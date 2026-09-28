@@ -41,3 +41,20 @@ max_tokens: 1024
 # Step 2: Run the evaluation pipeline
 bash run.sh
 ```
+
+## Reproducible ACI observation experiment
+
+This fork adds a shared console/JSONL observer, a CAI adapter, and focused
+`SafetyCheckInstruction` runs for MetaGPT, CAMEL, and CAI. The default scripts use
+the OpenAI-compatible Ollama endpoint at `http://127.0.0.1:11434/v1` with
+`llama3.2:latest`; override any `ACI_ARENA_*` environment variable to use another
+compatible model service.
+
+```bash
+./scripts/setup_experiment.sh
+./scripts/run_metagpt.sh
+./scripts/run_camel.sh
+./scripts/run_cai.sh
+```
+
+See `docs/experiment.md` for the observation points and verified run results.

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from aciarena.mas import BaseMAS
 from aciarena.evaluation.task import BaseTask
 from aciarena.attacks import BaseAttack
-from aciarena.defenses import ACISentinel, BertDetector
+from aciarena.defenses import ACISentinel
 from aciarena.utils.factory import register_executor, build_mas
 from typing import List, Dict
 import types
@@ -39,6 +39,8 @@ class BaseExecutor(ABC):
 
             return mas
         elif args.defense == 'bert_detector':            
+            from aciarena.defenses.bert_detector import BertDetector
+
             for agent_name in mas.agents:
                 agent = mas.get_agent(agent_name)
 
@@ -85,7 +87,9 @@ class ContinuousAttackExecutor(BaseExecutor):
             mas = build_mas(
                 args=mas_config["args"],
                 llm_config=mas_config["llm_config"],
-                logger=mas_config["logger"]
+                logger=mas_config["logger"],
+                observer_sink=mas_config.get("observation_sink"),
+                attack_name=attack.__class__.__name__,
             )
 
             attack.run(mas)

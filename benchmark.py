@@ -1,19 +1,19 @@
-from aciarena.utils import build_suite
+from aciarena.utils import build_suite, load_llm_config
 import argparse
 import json
 import os
-import yaml
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 def main(args):
-    with (PROJECT_ROOT / "configs/model.yaml").open("r", encoding="utf-8") as f:
-        model_config = yaml.safe_load(f)
+    model_config = load_llm_config(PROJECT_ROOT / "configs/model.yaml")
     model_name = model_config.get("model_name", "unknown").replace("/", "_")
 
-    save_dir = f"logs/{model_name}/{args.task_domain}/{args.mas}/{args.suite}"
+    save_dir = os.path.join(
+        args.output_dir, model_name, args.task_domain, args.mas, args.suite
+    )
     os.makedirs(save_dir, exist_ok=True)
 
     suite = build_suite(args)
@@ -33,8 +33,11 @@ def main(args):
         data = []
 
     # 追加新的结果
+    public_args = {
+        key: value for key, value in vars(args).items() if not key.startswith("_")
+    }
     data.append({
-        "meta_data": vars(args),
+        "meta_data": public_args,
         "result": result
     })
 
@@ -55,6 +58,12 @@ if __name__ == "__main__":
         type=str,
         default="hijacking",
         help="Specifies the evaluation suite."
+    )
+    parser.add_argument(
+        "--attack",
+        type=str,
+        default=None,
+        help="Run only one existing attack class, for example SafetyCheckInstruction.",
     )
     parser.add_argument(
         "--attack_mode",
@@ -80,6 +89,18 @@ if __name__ == "__main__":
         type=int,
         default=4,
         help="The max workers for evaluation."
+    )
+    parser.add_argument(
+        "--task_limit",
+        type=int,
+        default=0,
+        help="Limit the number of benchmark tasks (0 runs the complete dataset).",
+    )
+    parser.add_argument(
+        "--observer_jsonl",
+        type=str,
+        default=None,
+        help="Write agent interaction callback events to this JSONL file.",
     )
     parser.add_argument(
         "--output_dir",

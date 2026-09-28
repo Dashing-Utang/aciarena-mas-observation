@@ -24,6 +24,13 @@ class MetaGPT(BaseMAS):
     def _log_step(self, sender, receiver, message):
         if self.logger:
             self.logger.log_message(sender=sender, receiver=receiver, message=message)
+        self.observer.emit({
+            "from": sender,
+            "to": receiver,
+            "agent": receiver,
+            "event": "message_transfer",
+            "message": message,
+        })
         
     def _extract_bugs(self, qa_content: str) -> List[str]:
         bugs_match = re.search(r"## Bugs Found\n- ([^\n]+)", qa_content)
