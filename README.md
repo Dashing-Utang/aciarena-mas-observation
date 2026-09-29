@@ -44,11 +44,16 @@ bash run.sh
 
 ## Reproducible ACI observation experiment
 
-This fork adds a shared console/JSONL observer, a CAI adapter, and focused
+This fork adds a shared console/JSONL observer, an official CAI Framework adapter, and focused
 `SafetyCheckInstruction` runs for MetaGPT, CAMEL, and CAI. The default scripts use
 the OpenAI-compatible Ollama endpoint at `http://127.0.0.1:11434/v1` with
 `llama3.2:latest`; override any `ACI_ARENA_*` environment variable to use another
 compatible model service.
+
+The CAI adapter executes `cai-framework` 1.1.5 from the official
+`aliasrobotics/cai` archival commit `6dc79257777f5f1c9500b4d2319935d34a47412e`.
+CAI's upstream Research-Use License restricts its proprietary additions to
+non-commercial research and academic use.
 
 ```bash
 ./scripts/setup_experiment.sh

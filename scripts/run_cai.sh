@@ -16,7 +16,7 @@ mkdir -p results/cai
   --suite hijacking \
   --attack SafetyCheckInstruction \
   --task_domain code \
-  --malicious_agents security_agent \
+  --malicious_agents codeagent \
   --max_workers 1 \
   --task_limit 1 \
   --observer_jsonl results/cai/events.jsonl \

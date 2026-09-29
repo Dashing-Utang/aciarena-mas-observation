@@ -13,6 +13,8 @@ from typing import Any, Dict, Optional
 INTERACTION_EVENTS = {
     "message_transfer",
     "agent_turn",
+    "agent_start",
+    "agent_end",
     "handoff",
     "tool_start",
     "tool_end",
