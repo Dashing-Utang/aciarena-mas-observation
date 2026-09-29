@@ -14,9 +14,18 @@ from cai.sdk.agents import Agent, HandoffInputData, RunContextWrapper
 from aciarena.attacks.hijacking_attack import SafetyCheckInstruction
 from aciarena.mas.cai import CAI
 from aciarena.observation import ObservationSink
+from scripts.run_attack_matrix import attack_specs
 
 
 class ExperimentObservationTest(unittest.TestCase):
+    def test_matrix_discovers_every_registered_attack(self):
+        specs = attack_specs()
+        self.assertEqual(len(specs), 22)
+        self.assertEqual(sum(spec.registry_count for spec in specs), 23)
+        duplicated = [spec for spec in specs if spec.registry_count > 1]
+        self.assertEqual(len(duplicated), 1)
+        self.assertEqual(duplicated[0].name, "AnswerMappingAgent")
+
     def test_official_cai_handoff_tool_and_verify_events(self):
         config = {
             "provider": "openai",

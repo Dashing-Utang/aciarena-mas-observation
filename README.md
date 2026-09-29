@@ -62,4 +62,13 @@ non-commercial research and academic use.
 ./scripts/run_cai.sh
 ```
 
+Run the one-task compatibility matrix for every registered attack and all three
+MAS adapters with:
+
+```bash
+.venv/bin/python scripts/run_attack_matrix.py --task-limit 1
+```
+
+The validated matrix report is in `docs/attack-matrix.md`.
+
 See `docs/experiment.md` for the observation points and verified run results.

@@ -196,6 +196,10 @@ Actual final callbacks:
 The complete messages, run IDs, timestamps, and event order are preserved in each
 team's checked-in `events.jsonl` and `summary.jsonl` artifacts.
 
+The follow-up all-attack smoke matrix is documented in `docs/attack-matrix.md`.
+It exercised all 60 applicable registered attack instances across the three teams;
+all reached their original verifier and 14 returned a successful attack result.
+
 Every CAI lifecycle event also records:
 
 ```json
