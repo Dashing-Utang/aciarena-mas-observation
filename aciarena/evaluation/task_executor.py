@@ -87,9 +87,7 @@ class ContinuousAttackExecutor(BaseExecutor):
             mas = build_mas(
                 args=mas_config["args"],
                 llm_config=mas_config["llm_config"],
-                logger=mas_config["logger"],
-                observer_sink=mas_config.get("observation_sink"),
-                attack_name=attack.__class__.__name__,
+                logger=mas_config["logger"]
             )
 
             attack.run(mas)

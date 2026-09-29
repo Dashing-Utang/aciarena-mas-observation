@@ -3,14 +3,11 @@ from typing import Dict
 from aciarena.agent_components import BaseAgent
 from aciarena.agent_components.base_agent import get_llm
 from aciarena.agent_components.base_agent import Message
-from aciarena.observation import NullObserver
 
 class BaseMAS(ABC):
     def __init__(self, llm_config, malicious_agents=[], logger=None, max_turn=3):
         self.llm_config = llm_config
         self.logger = logger
-        self.observer = NullObserver()
-        self.attack_name = None
         self.max_turn = max_turn
         self.agents = self.init_agents()
 
@@ -18,12 +15,6 @@ class BaseMAS(ABC):
             if malicious_agent not in self.agents:
                 raise ValueError(f"Malicious agent '{malicious_agent}' not found in self.agents.")
         self.malicious_agents = malicious_agents
-
-    def set_observer(self, observer):
-        self.observer = observer or NullObserver()
-
-    def set_attack_context(self, attack_name: str):
-        self.attack_name = attack_name
 
     @abstractmethod
     def init_agents(self) -> Dict[str, BaseAgent]:

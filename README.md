@@ -42,33 +42,22 @@ max_tokens: 1024
 bash run.sh
 ```
 
-## Reproducible ACI observation experiment
+## CAI adapter
 
-This fork adds a shared console/JSONL observer, an official CAI Framework adapter, and focused
-`SafetyCheckInstruction` runs for MetaGPT, CAMEL, and CAI. The default scripts use
-the OpenAI-compatible Ollama endpoint at `http://127.0.0.1:11434/v1` with
-`llama3.2:latest`; override any `ACI_ARENA_*` environment variable to use another
-compatible model service.
+This fork adds Alias Robotics CAI Framework as an ACIArena MAS adapter. The
+dependency is pinned to `cai-framework` 1.1.5 at commit
+`6dc79257777f5f1c9500b4d2319935d34a47412e`.
 
-The CAI adapter executes `cai-framework` 1.1.5 from the official
-`aliasrobotics/cai` archival commit `6dc79257777f5f1c9500b4d2319935d34a47412e`.
-CAI's upstream Research-Use License restricts its proprietary additions to
-non-commercial research and academic use.
+After configuring `configs/model.yaml` and `configs/judge.yaml`, run CAI through
+the normal ACIArena entry point:
 
 ```bash
-./scripts/setup_experiment.sh
-./scripts/run_metagpt.sh
-./scripts/run_camel.sh
-./scripts/run_cai.sh
+python3 benchmark.py \
+  --mas cai \
+  --suite hijacking \
+  --task_domain code \
+  --malicious_agents codeagent \
+  --max_workers 1
 ```
 
-Run the one-task compatibility matrix for every registered attack and all three
-MAS adapters with:
-
-```bash
-.venv/bin/python scripts/run_attack_matrix.py --task-limit 1
-```
-
-The validated matrix report is in `docs/attack-matrix.md`.
-
-See `docs/experiment.md` for the observation points and verified run results.
+The adapter is located in `aciarena/mas/cai/`.

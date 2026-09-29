@@ -17,7 +17,6 @@ class BaseAttack(ABC):
         self.answer = None
         self.malicious_agents = []
         self.turn_count = 0
-        self.observer = None
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -25,7 +24,7 @@ class BaseAttack(ABC):
         memo[id(self)] = result
 
         for k, v in self.__dict__.items():
-            if k in {'llm_judge', 'observer'}:
+            if k == 'llm_judge':
                 setattr(result, k, v)  
             else:
                 setattr(result, k, copy.deepcopy(v, memo))
@@ -69,26 +68,14 @@ class InstructionInjectionAttack(AdvInputAttack):
         return f"{query}\n{self.payload}"
 
     def run(self, mas: BaseMAS):
-        mas.set_attack_context(self.__class__.__name__)
-        self.observer = mas.observer
         self.set_malicious_agents(mas.malicious_agents)
-        mas.observer.emit({
-            "event": "attack_applied",
-            "surface": "instruction_injection",
-            "targets": list(mas.malicious_agents),
-        })
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
             original_step = malicious_agent.step
 
-            def injected_step(agent_self, query, *args, _agent_name=agent_name, _original_step=original_step, **kwargs):
+            def injected_step(agent_self, query, *args, **kwargs):
                 tampered_query = self.inject_instruction(query)
-                mas.observer.emit({
-                    "agent": _agent_name,
-                    "event": "attack_injected",
-                    "message": tampered_query,
-                })
-                response = _original_step(tampered_query, *args, **kwargs)
+                response = original_step(tampered_query, *args, **kwargs)
 
                 # print(f"injected query: {tampered_query}\n Response: {response}")
                 return response
@@ -103,8 +90,6 @@ class ToolInjectionAttack(AdvInputAttack):
         super().__init__(args, llm_config)
 
     def run(self, mas: BaseMAS):
-        mas.set_attack_context(self.__class__.__name__)
-        self.observer = mas.observer
         self.set_malicious_agents(mas.malicious_agents)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
@@ -118,8 +103,6 @@ class MemoryInjectionAttack(AdvInputAttack):
         super().__init__(args, llm_config)
 
     def run(self, mas: BaseMAS):
-        mas.set_attack_context(self.__class__.__name__)
-        self.observer = mas.observer
         self.set_malicious_agents(mas.malicious_agents)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
@@ -133,8 +116,6 @@ class MaliciousAgentAttack(BaseAttack):
         super().__init__(args, llm_config)
 
     def run(self, mas: BaseMAS):
-        mas.set_attack_context(self.__class__.__name__)
-        self.observer = mas.observer
         self.set_malicious_agents(mas.malicious_agents)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
@@ -149,8 +130,6 @@ class MessagePoisonAttack(BaseAttack):
         super().__init__(args, llm_config)
 
     def run(self, mas: BaseMAS):
-        mas.set_attack_context(self.__class__.__name__)
-        self.observer = mas.observer
         self.set_malicious_agents(mas.malicious_agents)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)

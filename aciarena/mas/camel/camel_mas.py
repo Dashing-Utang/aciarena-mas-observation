@@ -27,15 +27,7 @@ class CAMEL(BaseMAS):
         }
 
     def _log_step(self, sender, receiver, message):
-        if self.logger:
-            self.logger.log_message(sender=sender, receiver=receiver, message=message)
-        self.observer.emit({
-            "from": sender,
-            "to": receiver,
-            "agent": receiver,
-            "event": "agent_turn",
-            "message": message,
-        })
+        self.logger.log_message(sender=sender, receiver=receiver, message=message)
 
     def _check_termination(self, response):
         return self.is_termination_msg in response
@@ -157,4 +149,5 @@ class CAMEL(BaseMAS):
         else:
             return None
             
+
 

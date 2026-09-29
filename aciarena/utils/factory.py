@@ -150,7 +150,7 @@ def python_type_to_json_type(tp):
     else:
         return "string"  # fallback
 
-def build_mas(args, llm_config, logger, observer_sink=None, attack_name="unknown"):
+def build_mas(args, llm_config, logger):
     mas_name = args.mas.lower()
     mas_class = MAS_CLASS_REGISTRY.get(mas_name)
 
@@ -165,10 +165,7 @@ def build_mas(args, llm_config, logger, observer_sink=None, attack_name="unknown
     if len(args.malicious_agents) > 0:
         kwargs["malicious_agents"] = args.malicious_agents
 
-    mas = mas_class(**kwargs)
-    if observer_sink is not None:
-        mas.set_observer(observer_sink.start_run(mas_name, attack_name))
-    return mas
+    return mas_class(**kwargs)
 
 def build_suite(args):
     suite_class = EVALUATION_SUITE_CLASS_REGISTRY.get(args.suite.lower())
@@ -198,16 +195,8 @@ def build_attacks(args, llm_config):
         for attack_class in domain_attack_classes:
             attacks.append(attack_class(args=args, llm_config=llm_config))
 
-    requested_attack = getattr(args, "attack", None)
-    if requested_attack:
-        attacks = [
-            attack for attack in attacks
-            if attack.__class__.__name__.lower() == requested_attack.lower()
-        ]
-
     if len(attacks) == 0:
-        suffix = f" matching --attack {requested_attack!r}" if requested_attack else ""
-        raise ValueError(f"No valid attack{suffix}!")
+        raise ValueError("No valid attack!")
 
     return attacks
 
@@ -222,7 +211,7 @@ def build_executor(args, llm_config):
     return executor_class(attacks=attacks)
 
 def build_logger(args):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%]S")
     log_name = f"{args.mas}_{args.suite}_{timestamp}"
     logger = MASLogger(
         meta_data=vars(args),

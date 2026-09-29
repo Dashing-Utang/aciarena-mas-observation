@@ -1,5 +1,4 @@
-from aciarena.utils import build_mas, build_logger, build_executor, register_suite, load_llm_config
-from aciarena.observation import build_observation_sink
+from aciarena.utils import build_mas, build_logger, build_executor, register_suite
 from aciarena.evaluation.task import MathTask, CodeTask, QATask
 from aciarena.attacks import MessagePoisonAttack, InstructionInjectionAttack, MaliciousAgentAttack
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,28 +21,18 @@ class BaseEvaluationSuite:
     def __init__(self, args):
         self.args = args
         self.logger = build_logger(args=args)
-        self.llm_config = load_llm_config(PROJECT_ROOT / "configs/model.yaml")
-        self.judge_config = load_llm_config(PROJECT_ROOT / "configs/judge.yaml")
-        observer_path = getattr(args, "observer_jsonl", None)
-        self.observation_sink = build_observation_sink(observer_path)
+        with (PROJECT_ROOT / "configs/model.yaml").open("r", encoding="utf-8") as f:
+            self.llm_config = yaml.safe_load(f)
+        with (PROJECT_ROOT / "configs/judge.yaml").open("r", encoding="utf-8") as f:
+            self.judge_config = yaml.safe_load(f)
         self.mas_config = {
             "args": args,
             "llm_config": self.llm_config,
-            "logger": self.logger,
-            "observation_sink": self.observation_sink,
+            "logger": self.logger
         }
         self.executor = build_executor(args=args, llm_config=self.judge_config)
         self.init_tasks(args=args)
-        if getattr(args, "task_limit", 0) > 0:
-            self.tasks = self.tasks[: args.task_limit]
         self.max_workers = args.max_workers
-
-    @staticmethod
-    def verify_attack(attack):
-        success = attack.verify()
-        if getattr(attack, "observer", None) is not None:
-            attack.observer.record_verification(bool(success))
-        return success
 
     def init_tasks(self, args):
         self.tasks = []
@@ -163,7 +152,7 @@ class DisruptionSuite(BaseEvaluationSuite):
             utility_results.append(utility)
             
         for attack in tqdm(finished_attacks, desc="Evaluating Security"):
-            security = self.verify_attack(attack)
+            security = attack.verify()
             if isinstance(attack, MessagePoisonAttack):
                 message_poison.append(security)
             elif isinstance(attack, MaliciousAgentAttack):
@@ -218,7 +207,7 @@ class HijackingSuite(BaseEvaluationSuite):
             utility_results.append(utility)
             
         for attack in tqdm(finished_attacks, desc="Evaluating Security"):
-            security = self.verify_attack(attack)
+            security = attack.verify()
             if isinstance(attack, MessagePoisonAttack):
                 message_poison.append(security)
             elif isinstance(attack, MaliciousAgentAttack):
@@ -278,7 +267,7 @@ class DisclosureSuite(BaseEvaluationSuite):
             utility_results.append(utility)
             
         for attack in tqdm(finished_attacks, desc="Evaluating Security"):
-            security = self.verify_attack(attack)
+            security = attack.verify()
             if isinstance(attack, MessagePoisonAttack):
                 message_poison.append(security)
             elif isinstance(attack, MaliciousAgentAttack):
