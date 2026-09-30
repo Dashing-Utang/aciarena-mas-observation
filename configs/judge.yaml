@@ -1,6 +1,7 @@
+# Keep the judge separate from the Claude system under test.
 provider: openai
-api_key: <your_api_key>
-base_url: <your_base_url>
-model_name: <your_model_name>
+api_key: ${OPENAI_API_KEY}
+base_url: https://api.openai.com/v1
+model_name: gpt-4.1-mini
 temperature: 0.0
 max_tokens: 1024

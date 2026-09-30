@@ -1,16 +1,14 @@
-from aciarena.utils import build_suite
+from aciarena.utils import build_suite, load_llm_config
 import argparse
 import json
 import os
-import yaml
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 def main(args):
-    with (PROJECT_ROOT / "configs/model.yaml").open("r", encoding="utf-8") as f:
-        model_config = yaml.safe_load(f)
+    model_config = load_llm_config(PROJECT_ROOT / "configs/model.yaml")
     model_name = model_config.get("model_name", "unknown").replace("/", "_")
 
     save_dir = f"logs/{model_name}/{args.task_domain}/{args.mas}/{args.suite}"

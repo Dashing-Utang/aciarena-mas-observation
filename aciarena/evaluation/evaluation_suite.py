@@ -1,9 +1,8 @@
-from aciarena.utils import build_mas, build_logger, build_executor, register_suite
+from aciarena.utils import build_mas, build_logger, build_executor, register_suite, load_llm_config
 from aciarena.evaluation.task import MathTask, CodeTask, QATask
 from aciarena.attacks import MessagePoisonAttack, InstructionInjectionAttack, MaliciousAgentAttack
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-import yaml
 import json
 import copy
 from pathlib import Path
@@ -21,10 +20,8 @@ class BaseEvaluationSuite:
     def __init__(self, args):
         self.args = args
         self.logger = build_logger(args=args)
-        with (PROJECT_ROOT / "configs/model.yaml").open("r", encoding="utf-8") as f:
-            self.llm_config = yaml.safe_load(f)
-        with (PROJECT_ROOT / "configs/judge.yaml").open("r", encoding="utf-8") as f:
-            self.judge_config = yaml.safe_load(f)
+        self.llm_config = load_llm_config(PROJECT_ROOT / "configs/model.yaml")
+        self.judge_config = load_llm_config(PROJECT_ROOT / "configs/judge.yaml")
         self.mas_config = {
             "args": args,
             "llm_config": self.llm_config,

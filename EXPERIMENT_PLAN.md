@@ -27,11 +27,21 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-다음 파일에 실행 모델과 judge 모델을 설정한다.
+노출된 기존 키는 폐기하고 새 키를 환경변수로 설정한다.
+
+```bash
+cp .env.example .env
+# .env에 새로 발급한 키 입력
+set -a
+source .env
+set +a
+```
+
+모델 역할은 다음과 같이 설정되어 있다.
 
 ```text
-configs/model.yaml
-configs/judge.yaml
+configs/model.yaml  → Claude 실험 대상 모델
+configs/judge.yaml  → OpenAI 공격 판정 모델
 ```
 
 ## 2. 먼저 확인할 구조

@@ -24,17 +24,21 @@ pip install -e .
 
 ## 🚀 Quickstart
 
-### 1. Set up the API keys for both the agent model and the judge model.
-See `configs/judge.yaml` and `configs/model.yaml`
-```yaml
-# Step 1: Set up the API keys
-provider: openai
-api_key: <your_api_key>
-base_url: <your_base_url>
-model_name: <your_model_name>
-temperature: 0.0
-max_tokens: 1024
+### 1. Set up API keys for the agent and judge models.
+
+Do not commit API keys. Copy the environment template, enter newly issued keys,
+and export them before running the benchmark:
+
+```bash
+cp .env.example .env
+set -a
+source .env
+set +a
 ```
+
+`configs/model.yaml` uses Claude as the system under test through Anthropic's
+OpenAI SDK compatibility endpoint. `configs/judge.yaml` uses OpenAI as the
+separate judge.
 
 ### 2. Run Evaluation
 ```bash
