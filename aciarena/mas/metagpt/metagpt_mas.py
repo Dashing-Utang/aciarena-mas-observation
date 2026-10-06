@@ -3,6 +3,9 @@ from aciarena.mas.metagpt.agents import *
 from aciarena.utils.factory import register_mas
 from typing import List
 import re
+from aciarena.observability.context import bind_edge, get_turn
+from aciarena.observability.trace import new_edge_id
+from aciarena.guardrails import apply_guard
 
 @register_mas("metagpt")
 class MetaGPT(BaseMAS):
@@ -22,8 +25,13 @@ class MetaGPT(BaseMAS):
         return agents
 
     def _log_step(self, sender, receiver, message):
+        edge_id = new_edge_id()
+        delivered = message
+        if sender == "engineer" and receiver == "qa_engineer":
+            delivered = apply_guard("PRE_DELEGATION", message, sender=sender, receiver=receiver, edge_id=edge_id)
         if self.logger:
-            self.logger.log_message(sender=sender, receiver=receiver, message=message)
+            self.logger.log_message(sender=sender, receiver=receiver, message=delivered, edge_id=edge_id)
+        return edge_id, delivered
         
     def _extract_bugs(self, qa_content: str) -> List[str]:
         bugs_match = re.search(r"## Bugs Found\n- ([^\n]+)", qa_content)
@@ -41,7 +49,7 @@ class MetaGPT(BaseMAS):
         return bool(self._extract_bugs(qa_content) or self._extract_suggestions(qa_content))
 
     def bootstrap(self, query: str):
-        self._log_step(sender="user", receiver="product_manager", message=query)
+        self._incoming_edge, _ = self._log_step(sender="user", receiver="product_manager", message=query)
         args = {
             "query": query,
             "response": None
@@ -51,27 +59,34 @@ class MetaGPT(BaseMAS):
 
     def step(self, args):
         terminate = False
-        product_manager_response = self.get_agent("product_manager").run_step(query=args["query"])
-        self._log_step("product_manager", "architect", product_manager_response)
+        if get_turn() > 1:
+            self._incoming_edge, _ = self._log_step("user", "product_manager", args["query"])
+        with bind_edge(self._incoming_edge):
+            product_manager_response = self.get_agent("product_manager").run_step(query=args["query"])
+        edge, _ = self._log_step("product_manager", "architect", product_manager_response)
 
-        architect_response = self.get_agent("architect").run_step(query={
-            "product_manager_response": product_manager_response,
-        })
-        self._log_step("architect", "project_manager", architect_response)
+        with bind_edge(edge):
+            architect_response = self.get_agent("architect").run_step(query={
+                "product_manager_response": product_manager_response,
+            })
+        edge, _ = self._log_step("architect", "project_manager", architect_response)
 
-        project_manager_response = self.get_agent("project_manager").run_step(query={
-            "architect_response": architect_response,
-        })
-        self._log_step("project_manager", "engineer", project_manager_response)
+        with bind_edge(edge):
+            project_manager_response = self.get_agent("project_manager").run_step(query={
+                "architect_response": architect_response,
+            })
+        edge, _ = self._log_step("project_manager", "engineer", project_manager_response)
 
-        engineer_response = self.get_agent("engineer").run_step(query={
-            "project_manager_response": project_manager_response,
-        })
-        self._log_step("engineer", "qa_engineer", engineer_response)
+        with bind_edge(edge):
+            engineer_response = self.get_agent("engineer").run_step(query={
+                "project_manager_response": project_manager_response,
+            })
+        edge, delivered = self._log_step("engineer", "qa_engineer", engineer_response)
 
-        qa_engineer_response = self.get_agent("qa_engineer").run_step(query={
-            "engineer_response": engineer_response,
-        })
+        with bind_edge(edge):
+            qa_engineer_response = self.get_agent("qa_engineer").run_step(query={
+                "engineer_response": delivered,
+            })
         self._log_step("qa_engineer", "system", qa_engineer_response)
 
         args["response"] = qa_engineer_response

@@ -3,6 +3,7 @@ from aciarena.mas.camel.agents import *
 from aciarena.utils.factory import register_mas
 from aciarena.mas.camel.prompt import SystemPromptGenerator
 import re
+from aciarena.observability.context import bind_edge
 
 @register_mas("camel")
 class CAMEL(BaseMAS):
@@ -27,24 +28,32 @@ class CAMEL(BaseMAS):
         }
 
     def _log_step(self, sender, receiver, message):
-        self.logger.log_message(sender=sender, receiver=receiver, message=message)
+        return self.logger.log_message(sender=sender, receiver=receiver, message=message)
 
     def _check_termination(self, response):
         return self.is_termination_msg in response
+
+    def _set_assistant_profile(self, role_profile):
+        assistant = self.get_agent("assistant")
+        # MaliciousAgentAttack installs its replacement profile before bootstrap.
+        # Keep that profile when initializing the assistant's system memory.
+        profile = assistant.profile if assistant.profile is not None else role_profile
+        assistant.update_profile(profile)
     
     def bootstrap(self, query): 
         _, _, _, task_specify_sys_msg, task_specify_prompt, _ = self.system_prompt_generator.generate(self.config["assistant_role"], self.config["user_role"], query)
         task_specifier = self.get_agent("task_specifier")
         task_specifier.update_profile(task_specify_sys_msg)
-        self._log_step(sender="user", receiver="task_specifier", message=task_specify_prompt)
-        specified_task = task_specifier.run_step(query=task_specify_prompt, option_num=self.config["option_num"])
+        edge = self._log_step(sender="user", receiver="task_specifier", message=task_specify_prompt)
+        with bind_edge(edge):
+            specified_task = task_specifier.run_step(query=task_specify_prompt, option_num=self.config["option_num"])
         if self.config["option_num"] == 1:
             specified_task = specified_task[0]
-        self._log_step(sender="task_specifier", receiver="user_proxy", message=specified_task)
+        self._pending_edge = self._log_step(sender="task_specifier", receiver="user_proxy", message=specified_task)
 
         if self.config["with_critic"]:
             assistant_sys_msg, user_sys_msg, user_prompt, _, _, critic_sys_msg = self.system_prompt_generator.generate(self.config["assistant_role"], self.config["user_role"], specified_task, critic_role=self.config["critic_role"])
-            self.get_agent("assistant").update_profile(assistant_sys_msg)
+            self._set_assistant_profile(assistant_sys_msg)
             self.get_agent("user_proxy").update_profile(user_sys_msg)
             self.get_agent("critic").update_profile(critic_sys_msg)
             
@@ -52,7 +61,7 @@ class CAMEL(BaseMAS):
             
         else:
             assistant_sys_msg, user_sys_msg, user_prompt, _, _, _ = self.system_prompt_generator.generate(self.config["assistant_role"], self.config["user_role"], specified_task)
-            self.get_agent("assistant").update_profile(assistant_sys_msg)
+            self._set_assistant_profile(assistant_sys_msg)
             self.get_agent("user_proxy").update_profile(user_sys_msg)
 
             assistant_response = self._dialog_loop(user_prompt)
@@ -82,13 +91,15 @@ class CAMEL(BaseMAS):
 
     def _dialog_loop_critic(self, assistant_response):
         
-        user_proxy_completion = self.get_agent("user_proxy").run_step(query=assistant_response, option_num=self.config["option_num"])
+        with bind_edge(self._pending_edge):
+            user_proxy_completion = self.get_agent("user_proxy").run_step(query=assistant_response, option_num=self.config["option_num"])
         user_proxy_response = self.form_user_response(user_proxy_completion, self.config["option_num"])
-        self._log_step(sender="user_proxy", receiver="critic", message=user_proxy_response)
+        edge = self._log_step(sender="user_proxy", receiver="critic", message=user_proxy_response)
 
         if self._check_termination(user_proxy_response):
             return self.is_termination_msg            
-        critic_response = self.get_agent("critic").run_step(query=user_proxy_response)
+        with bind_edge(edge):
+            critic_response = self.get_agent("critic").run_step(query=user_proxy_response)
         self._log_step(sender="critic", receiver="user_proxy", message=critic_response)
         selected_option = self.find_option(critic_response)
 
@@ -99,27 +110,30 @@ class CAMEL(BaseMAS):
             raise ValueError(f"Invalid critic selection: {selected_option}")
         
         selected_user_response = user_proxy_completion[selected_option-1]
-        self._log_step(sender="user_proxy", receiver="assistant", message=selected_user_response)
+        edge = self._log_step(sender="user_proxy", receiver="assistant", message=selected_user_response)
 
         
-        assistant_completion = self.get_agent("assistant").run_step(query=selected_user_response, option_num=self.config["option_num"])
+        with bind_edge(edge):
+            assistant_completion = self.get_agent("assistant").run_step(query=selected_user_response, option_num=self.config["option_num"])
         assistant_response = self.form_assistant_response(assistant_completion, self.config["option_num"])
                 
         # Find the response from critic agent and get the selected option
     
         selected_assistant_response = assistant_completion[selected_option-1]
-        self._log_step(sender="assistant", receiver="user_proxy", message=selected_assistant_response)
+        self._pending_edge = self._log_step(sender="assistant", receiver="user_proxy", message=selected_assistant_response)
 
         return selected_assistant_response
     def _dialog_loop(self, assistant_response):
         
-        user_proxy_response = self.get_agent("user_proxy").run_step(query=assistant_response)
-        self._log_step(sender="user_proxy", receiver="assistant", message=user_proxy_response[0])
+        with bind_edge(self._pending_edge):
+            user_proxy_response = self.get_agent("user_proxy").run_step(query=assistant_response)
+        edge = self._log_step(sender="user_proxy", receiver="assistant", message=user_proxy_response[0])
         if self._check_termination(user_proxy_response[0]):
             return self.is_termination_msg       
 
-        assistant_response = self.get_agent("assistant").run_step(query=user_proxy_response[0])
-        self._log_step(sender="assistant", receiver="user_proxy", message=assistant_response[0])
+        with bind_edge(edge):
+            assistant_response = self.get_agent("assistant").run_step(query=user_proxy_response[0])
+        self._pending_edge = self._log_step(sender="assistant", receiver="user_proxy", message=assistant_response[0])
 
         return assistant_response[0]
 
@@ -149,5 +163,3 @@ class CAMEL(BaseMAS):
         else:
             return None
             
-
-

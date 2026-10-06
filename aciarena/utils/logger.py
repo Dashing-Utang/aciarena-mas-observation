@@ -4,6 +4,8 @@ import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from colorlog import ColoredFormatter
+from aciarena.observability.context import get_run_context
+from aciarena.observability.trace import emit, fingerprint, new_edge_id, sanitize
 
 
 class MASLogger:
@@ -40,6 +42,7 @@ class MASLogger:
             # File output (no color)
             file_path = os.path.join(log_dir, f"{name}.log")
             file_handler = RotatingFileHandler(file_path, maxBytes=5 * 1024 * 1024, backupCount=2)
+            os.chmod(file_path, 0o600)
             file_formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
             file_handler.setFormatter(file_formatter)
             self.logger.addHandler(file_handler)
@@ -54,7 +57,7 @@ class MASLogger:
         }
         self.json_path = os.path.join(self.json_dir, f"{name}.json")
 
-    def log_message(self, sender, receiver, message, tool=None):
+    def log_message(self, sender, receiver, message, tool=None, event="MESSAGE_TRANSFER", edge_id=None):
         """
         Log an agent-to-agent message.
 
@@ -64,13 +67,21 @@ class MASLogger:
         :param tool: tool name if invoked
         :param metadata: any additional dict data
         """
-        self.logger.info(f"[{sender} → {receiver}] {message}")
+        edge_id = edge_id or new_edge_id()
+        safe_message = sanitize(message)
+        run = get_run_context() or {}
+        self.logger.info(f"[{run.get('run_id', 'legacy')}] [{sender} → {receiver}] {safe_message}")
         self.session["turns"].append({
+            "run_id": run.get("run_id"),
+            "edge_id": edge_id,
             "sender": sender,
             "receiver": receiver,
-            "message": message,
+            "message": safe_message,
             "tool": tool,
         })
+        emit(event, sender=sender, receiver=receiver, edge_id=edge_id,
+             message=message, message_sha256=fingerprint(message)["sha256"], tool=tool)
+        return edge_id
 
     def log_result(self, result: dict):
         """Log and save the final result of the session."""
@@ -82,4 +93,5 @@ class MASLogger:
         """Persist the structured log as a JSON file."""
         with open(self.json_path, "w", encoding="utf-8") as f:
             json.dump(self.session, f, ensure_ascii=False, indent=2)
+        os.chmod(self.json_path, 0o600)
         self.logger.info(f"[LOG SAVED] log saved to {self.json_path}")

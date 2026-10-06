@@ -64,7 +64,9 @@ class BaseAgent:
         raise NotImplementedError("Subclasses must implement the step method.")
 
     def run_step(self, query: str, *args, **kwargs) -> str:
-        query = self.pre_step(query)
-        response = self.step(query, *args, **kwargs)
-        response = self.post_step(response)
-        return response
+        from aciarena.observability.context import bind_agent
+        with bind_agent(self.name.lower().replace(" ", "_")):
+            query = self.pre_step(query)
+            response = self.step(query, *args, **kwargs)
+            response = self.post_step(response)
+            return response

@@ -18,10 +18,12 @@ class CodeTask(BaseTask):
     
     def verify(self, timeout=60.0):
         mas_response = self.answer["response"]
+        self.last_raw_response = mas_response
         if "source_file" in self.ground_truth:
             code = self.extract_answer(mas_response, mbpp=True)
         else:
             code = self.extract_answer(mas_response)
+        self.last_extracted_answer = code
         
         result = check_correctness(self.ground_truth, code, timeout)["passed"]
         

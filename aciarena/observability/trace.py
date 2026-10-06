@@ -1,0 +1,112 @@
+"""Immediately appended, run-isolated JSONL events.
+
+This is an observational artifact, not a security boundary for untrusted users.
+"""
+
+import hashlib
+import json
+import os
+import re
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+from .context import get_agent, get_edge, get_run_context, get_turn
+
+
+_SECRET = re.compile(
+    r"(?i)(?:Incorrect API key provided:\s*)[^\s,;\"']+|"
+    r"(?i:(?:Bearer\s+)[A-Za-z0-9._~-]+)|"
+    r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b|"
+    r"(?i:(?:api[_ -]?key|authorization|access[_ -]?token|secret)\s*[:=]\s*)[^\s,;\"']+"
+)
+_PATH_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_lock = threading.Lock()
+
+
+def sanitize(value):
+    if isinstance(value, str):
+        value = _SECRET.sub("[REDACTED]", value)
+        for env_name, env_value in os.environ.items():
+            if ("KEY" in env_name or "TOKEN" in env_name or "SECRET" in env_name) and len(env_value) >= 8:
+                value = value.replace(env_value, "[REDACTED]")
+        return value
+    if isinstance(value, dict):
+        return {str(k): ("[REDACTED]" if re.search(r"(?i)(api.?key|authorization|secret|access.?token)", str(k)) else sanitize(v)) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [sanitize(v) for v in value]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return sanitize(str(value))
+
+
+def _part(value):
+    value = str(value)
+    if not _PATH_PART.fullmatch(value) or value in (".", ".."):
+        raise ValueError("Unsafe trace path component")
+    return value
+
+
+def trace_path(context=None):
+    ctx = context or get_run_context()
+    if not ctx:
+        return None
+    return Path(ctx["trace_dir"]) / _part(ctx["session_id"]) / _part(ctx["mas_name"]) / _part(ctx["task_id"]) / (_part(ctx["run_id"]) + ".jsonl")
+
+
+def new_event_id():
+    return "V" + uuid4().hex
+
+
+def new_edge_id():
+    return "E" + uuid4().hex
+
+
+def fingerprint(value):
+    text = str(value)
+    return {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "length": len(text)}
+
+
+def emit(event_type, *, agent=None, sender=None, receiver=None, edge_id=None, **data):
+    ctx = get_run_context()
+    if not ctx or not ctx.get("trace", False):
+        return None
+    record = {
+        "schema_version": "1.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_id": new_event_id(),
+        "session_id": ctx["session_id"],
+        "run_id": ctx["run_id"],
+        "task_id": ctx["task_id"],
+        "task_name": ctx.get("task_name"),
+        "mas": ctx["mas_name"],
+        "suite": ctx["suite"],
+        "task_domain": ctx["task_domain"],
+        "attack_id": ctx.get("attack_id"),
+        "attack_name": ctx["attack_name"],
+        "attack_surface": ctx.get("attack_surface"),
+        "turn": get_turn(),
+        "edge_id": edge_id if edge_id is not None else get_edge(),
+        "event_type": event_type,
+        "agent": agent if agent is not None else get_agent(),
+        "sender": sender,
+        "receiver": receiver,
+        "guard_mode": ctx.get("guard_mode", "off"),
+        "data": sanitize(data),
+    }
+    path = trace_path(ctx)
+    with _lock:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    return record["event_id"]
+
+
+def read_trace(context):
+    path = trace_path(context)
+    if not path or not path.exists():
+        return []
+    with path.open(encoding="utf-8") as stream:
+        return [json.loads(line) for line in stream if line.strip()]

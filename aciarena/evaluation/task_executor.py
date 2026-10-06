@@ -6,6 +6,9 @@ from aciarena.defenses import ACISentinel
 from aciarena.utils.factory import register_executor, build_mas
 from typing import List, Dict
 import types
+import copy
+from aciarena.observability.context import clear_run_context, set_run_context, set_turn
+from aciarena.observability.trace import emit
 
 class BaseExecutor(ABC):
     def __init__(self, attacks: List[BaseAttack]):
@@ -81,42 +84,79 @@ class ContinuousAttackExecutor(BaseExecutor):
 
     def execute(self, mas_config: Dict, task: BaseTask, user_information=None):
         results = []
+        finished_attacks = []
+        attacks = copy.deepcopy(self.attacks)
+        run_args = mas_config["args"]
+        for repetition in range(1, getattr(run_args, "repeat", 1) + 1):
+            for attack in attacks:
+                turn = 0
+                task_id = getattr(task, "task_id", "T01")
+                run_id = f"{task_id}_{attack.__class__.__name__}_r{repetition:02d}"
+                tag = getattr(run_args, "run_tag", "")
+                if tag:
+                    run_id += "_" + tag
+                ctx = {
+                    "session_id": getattr(run_args, "session_id", "manual"),
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "task_name": getattr(task, "task_name", task_id),
+                    "dataset_index": getattr(task, "dataset_index", None),
+                    "mas_name": run_args.mas,
+                    "suite": run_args.suite,
+                    "task_domain": run_args.task_domain,
+                    "attack_id": attack.__class__.__name__,
+                    "attack_name": attack.__class__.__name__,
+                    "attack_surface": attack.attack_surface,
+                    "trace": getattr(run_args, "trace", False),
+                    "trace_dir": getattr(run_args, "trace_dir", "logs/traces"),
+                    "guard_mode": getattr(run_args, "guard_mode", "off"),
+                    "guard": getattr(run_args, "guard", "noop"),
+                }
+                set_run_context(**ctx)
+                args = {"query": task.get_query(), "response": ""}
+                error = None
+                try:
+                    emit("RUN_START", model=mas_config["llm_config"].get("model_name"),
+                         judge_model=attack.llm_judge.model_name, task_query=task.get_query(),
+                         target_agents=run_args.malicious_agents, max_workers=run_args.max_workers,
+                         guard=ctx["guard"], attack_payload=attack.payload,
+                         commit_sha=getattr(run_args, "commit_sha", None),
+                         worktree_dirty=getattr(run_args, "worktree_dirty", None))
+                    mas = build_mas(args=run_args, llm_config=mas_config["llm_config"],
+                                    logger=mas_config["logger"])
+                    attack.run(mas)
+                    mas = self.load_defense(run_args, task.get_query(), mas)
+                    if user_information:
+                        for agent in mas.agents.values():
+                            agent.profile = f"{user_information}\n{agent.profile}"
+                            agent.user_information = user_information
+                    emit("BOOTSTRAP_START")
+                    args, terminate = mas.bootstrap(task.get_query())
+                    if not terminate:
+                        for turn in range(1, mas.max_turn + 1):
+                            set_turn(turn)
+                            args, terminate = mas.step(args)
+                            if terminate:
+                                break
+                    args = mas.conclude(args)
+                    args["token_usage"] = mas.get_token_usage()
+                except Exception as exc:
+                    error = {"stage": "execution", "error_type": type(exc).__name__, "message": str(exc)}
+                    emit("ERROR", **error)
+                    args["response"] = str(args.get("response") or "")
+                finally:
+                    args["query"] = task.get_query()
+                    args["ground_truth"] = task.get_gt()
+                    args["_run_context"] = ctx
+                    args["_error"] = error
+                    emit("FINAL_RESPONSE", response=args.get("response", ""))
+                    attack.set_turn(turn)
+                    attack.set_answer(args)
+                    finished_attacks.append(copy.deepcopy(attack))
+                    results.append(args)
+                    clear_run_context()
 
-        for attack in self.attacks:
-            turn = 1
-            mas = build_mas(
-                args=mas_config["args"],
-                llm_config=mas_config["llm_config"],
-                logger=mas_config["logger"]
-            )
-
-            attack.run(mas)
-
-            mas = self.load_defense(mas_config["args"], task.get_query(), mas)
-
-            if user_information:
-                for agent in mas.agents.values():
-                    agent.profile = f"{user_information}\n{agent.profile}"
-                    agent.user_information = user_information
-
-            args, terminate = mas.bootstrap(task.get_query())
-            if not terminate:
-                for _ in range(mas.max_turn):
-                    args, terminate = mas.step(args)
-                    turn += 1
-                    if terminate:
-                        break
-            args = mas.conclude(args)
-
-            args["token_usage"] = mas.get_token_usage()
-            args["query"] = task.get_query()
-            args["ground_truth"] = task.get_gt()
-
-            attack.set_turn(turn)
-            attack.set_answer(args)
-            results.append(args)
-
-        return {"utility": results, "attacks": self.attacks}
+        return {"utility": results, "attacks": finished_attacks}
 
 
 

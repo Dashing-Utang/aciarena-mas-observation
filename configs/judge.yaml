@@ -1,7 +1,7 @@
-# Keep the judge separate from the Claude system under test.
+# GPT-5 judge; matches the system-under-test model.
 provider: openai
 api_key: ${OPENAI_API_KEY}
 base_url: https://api.openai.com/v1
-model_name: gpt-4.1-mini
+model_name: gpt-5-2025-08-07
 temperature: 0.0
-max_tokens: 1024
+max_tokens: 2048

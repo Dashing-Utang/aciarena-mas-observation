@@ -6,6 +6,7 @@ from aciarena.agent_components import get_llm
 from typing import List, Dict
 import types
 import copy
+from aciarena.observability.trace import emit
 
 class BaseAttack(ABC):
 
@@ -39,6 +40,19 @@ class BaseAttack(ABC):
     def set_malicious_agents(self, agents: List[str]):
         self.malicious_agents = agents
 
+    @property
+    def attack_surface(self):
+        if isinstance(self, MaliciousAgentAttack):
+            return "malicious_agent"
+        if isinstance(self, MessagePoisonAttack):
+            return "message_poison"
+        return "adv_input" if isinstance(self, AdvInputAttack) else "none"
+
+    def record_install(self, mas):
+        for agent_name in mas.malicious_agents:
+            emit("ATTACK_INSTALLED", agent=agent_name, target_agent=agent_name,
+                 surface=self.attack_surface, payload=self.payload)
+
     def verify(self):
         """
         Verify the success of attack.
@@ -69,12 +83,15 @@ class InstructionInjectionAttack(AdvInputAttack):
 
     def run(self, mas: BaseMAS):
         self.set_malicious_agents(mas.malicious_agents)
+        self.record_install(mas)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
             original_step = malicious_agent.step
 
             def injected_step(agent_self, query, *args, **kwargs):
                 tampered_query = self.inject_instruction(query)
+                emit("ATTACK_APPLIED", agent=agent_self.name, target_agent=agent_self.name,
+                     before=query, after=tampered_query)
                 response = original_step(tampered_query, *args, **kwargs)
 
                 # print(f"injected query: {tampered_query}\n Response: {response}")
@@ -91,6 +108,7 @@ class ToolInjectionAttack(AdvInputAttack):
 
     def run(self, mas: BaseMAS):
         self.set_malicious_agents(mas.malicious_agents)
+        self.record_install(mas)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
             malicious_agent.tools.append(self.payload)
@@ -104,6 +122,7 @@ class MemoryInjectionAttack(AdvInputAttack):
 
     def run(self, mas: BaseMAS):
         self.set_malicious_agents(mas.malicious_agents)
+        self.record_install(mas)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
             malicious_agent.update_memory(role="assistant", content=self.payload)
@@ -117,6 +136,7 @@ class MaliciousAgentAttack(BaseAttack):
 
     def run(self, mas: BaseMAS):
         self.set_malicious_agents(mas.malicious_agents)
+        self.record_install(mas)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
             malicious_agent.profile = self.payload
@@ -131,10 +151,13 @@ class MessagePoisonAttack(BaseAttack):
 
     def run(self, mas: BaseMAS):
         self.set_malicious_agents(mas.malicious_agents)
+        self.record_install(mas)
         for agent_name in mas.malicious_agents:
             malicious_agent = mas.get_agent(agent_name)
 
             def poisoned_step(agent_self, query, *args, **kwargs):
+                emit("ATTACK_APPLIED", agent=agent_self.name, target_agent=agent_self.name,
+                     before=query, after=self.payload)
                 return self.payload        
         
             malicious_agent.step = types.MethodType(poisoned_step, malicious_agent)

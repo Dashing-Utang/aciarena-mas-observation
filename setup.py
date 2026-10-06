@@ -9,6 +9,7 @@ setup(
         "pydantic>=2.10.0,<3",
         "tenacity==9.0.0",
         "PyYAML==6.0.2",
+        "python-dotenv>=1.0.0,<2",
         "datasets==3.6.0",
         "math-verify==0.6.0",
         "human_eval==1.0.3",

@@ -198,6 +198,15 @@ def build_attacks(args, llm_config):
     if len(attacks) == 0:
         raise ValueError("No valid attack!")
 
+    requested = getattr(args, "attack_names", None)
+    if requested:
+        names = {name.strip() for name in requested.split(",") if name.strip()}
+        available = {attack.__class__.__name__ for attack in attacks}
+        unknown = names - available
+        if unknown:
+            raise ValueError(f"Unknown attack names: {sorted(unknown)}; available: {sorted(available)}")
+        attacks = [attack for attack in attacks if attack.__class__.__name__ in names]
+
     return attacks
 
 def build_executor(args, llm_config):
@@ -211,7 +220,7 @@ def build_executor(args, llm_config):
     return executor_class(attacks=attacks)
 
 def build_logger(args):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%]S")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_name = f"{args.mas}_{args.suite}_{timestamp}"
     logger = MASLogger(
         meta_data=vars(args),

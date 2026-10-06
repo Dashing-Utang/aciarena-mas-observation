@@ -3,6 +3,7 @@ from openai import OpenAI, AsyncOpenAI
 from openai import OpenAIError, RateLimitError, APIConnectionError, Timeout, BadRequestError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential, AsyncRetrying, RetryError
 from pydantic import BaseModel
+from aciarena.observability.trace import emit
 
 class AgentResponseSchema(BaseModel):
     response: str
@@ -43,35 +44,32 @@ class OpenAILLM(BaseLLM):
         reraise=True
     )
     def call_llm(self, messages, temperature=None, json_output=False, option_num=None, is_multi_options=False) -> str:
-        if temperature is not None:
-            params = {
-                "model": self.model_name,
-                "messages": messages,
-                "max_tokens": self.max_tokens,
-                "temperature": temperature,
-                "seed": self.seed
-            }
+        params = {"model": self.model_name, "messages": messages}
+        if self.model_name.startswith("gpt-5"):
+            params["max_completion_tokens"] = self.max_tokens
         else:
-            params = {
-                "model": self.model_name,
-                "messages": messages,
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                "seed": self.seed
-            }
+            params.update(
+                max_tokens=self.max_tokens,
+                temperature=self.temperature if temperature is None else temperature,
+                seed=self.seed,
+            )
         if json_output:
             params["response_format"] = {"type": "json_object"}
         
         try:
+            emit("LLM_REQUEST", model=self.model_name, messages=messages)
             if is_multi_options and option_num is not None:
                 params["n"] = option_num
                 response = self.client.chat.completions.create(**params)
                 self.calculate_token_usage(response)
+                emit("AGENT_OUTPUT", output=[choice.message.content for choice in response.choices])
                 return response
             else:    
                 response = self.client.chat.completions.create(**params)
                 self.calculate_token_usage(response)
-                return response.choices[0].message.content if response.choices else "[Empty response]"
+                output = response.choices[0].message.content if response.choices else "[Empty response]"
+                emit("AGENT_OUTPUT", output=output)
+                return output
         except BadRequestError as e:
             raise RuntimeError(f"Bad request to OpenAI API: {e}")
         except OpenAIError as e:
@@ -88,14 +86,20 @@ class OpenAILLM(BaseLLM):
                 reraise=True
             ):
                 with attempt:
-                    response = await self.async_client.chat.completions.create(
-                        model=self.model_name,
-                        messages=messages,
-                        max_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                        seed=self.seed
-                    )
-            return response.choices[0].message.content if response.choices else "[Empty response]"
+                    params = {"model": self.model_name, "messages": messages}
+                    if self.model_name.startswith("gpt-5"):
+                        params["max_completion_tokens"] = self.max_tokens
+                    else:
+                        params.update(
+                            max_tokens=self.max_tokens,
+                            temperature=self.temperature,
+                            seed=self.seed,
+                        )
+                    emit("LLM_REQUEST", model=self.model_name, messages=messages)
+                    response = await self.async_client.chat.completions.create(**params)
+            output = response.choices[0].message.content if response.choices else "[Empty response]"
+            emit("AGENT_OUTPUT", output=output)
+            return output
         except BadRequestError as e:
             raise RuntimeError(f"Bad request to OpenAI API: {e}")
         except OpenAIError as e:

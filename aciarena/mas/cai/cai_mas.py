@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 # placeholder satisfies that import path and is replaced from llm_config before
 # the benchmark performs a model request.
 os.environ.setdefault("OPENAI_API_KEY", "sk-aciarena-local-placeholder")
+os.environ.setdefault("CAI_PRICE_LIMIT", "10")
 
 from cai.sdk.agents import (
     Agent,
@@ -28,6 +29,8 @@ from cai.sdk.agents import (
 from aciarena.mas import BaseMAS
 from aciarena.mas.cai.agents import CodeAgentSurface, SelectionAgentSurface
 from aciarena.utils.factory import register_mas
+from aciarena.observability.trace import emit, new_edge_id, fingerprint
+from aciarena.observability.context import bind_edge, get_run_context
 
 
 @function_tool
@@ -39,6 +42,37 @@ def final_answer(value: str) -> str:
     """
 
     return value
+
+
+class ObservedOpenAIChatCompletionsModel(OpenAIChatCompletionsModel):
+    """Observe the converted messages at CAI's actual LiteLLM boundary."""
+
+    async def _fetch_response_litellm_openai(self, kwargs, model_settings, tool_choice, stream, parallel_tool_calls):
+        kwargs = dict(kwargs)
+        if str(kwargs.get("model", "")).startswith("gpt-5"):
+            kwargs.pop("max_tokens", None)
+            kwargs.pop("temperature", None)
+            kwargs["max_completion_tokens"] = self.completion_budget
+        request_hash = fingerprint(kwargs.get("messages"))["sha256"]
+        if request_hash == getattr(self, "_last_request_hash", None):
+            self._same_request_count = getattr(self, "_same_request_count", 0) + 1
+        else:
+            self._last_request_hash = request_hash
+            self._same_request_count = 1
+        if self._same_request_count > 8:
+            raise RuntimeError("CAI repeated an identical model request more than 8 times; aborting run")
+        agent = "codeagent" if self.agent_name.lower().startswith("codeagent") else "selection_agent"
+        emit("LLM_REQUEST", agent=agent, model=str(kwargs.get("model")),
+             messages=kwargs.get("messages"), request_source="cai_litellm",
+             identical_attempt=self._same_request_count)
+        try:
+            return await super()._fetch_response_litellm_openai(
+                kwargs, model_settings, tool_choice, stream, parallel_tool_calls
+            )
+        except Exception as exc:
+            if self._same_request_count <= 2:
+                emit("ERROR", stage="cai_model_call", error_type=type(exc).__name__, message=str(exc)[:500])
+            raise
 
 
 @register_mas("cai")
@@ -67,7 +101,7 @@ class CAI(BaseMAS):
         os.environ["CAI_MODEL"] = model_name
         os.environ.setdefault("CAI_TRACING", "false")
         os.environ.setdefault("CAI_GUARDRAILS", "false")
-        os.environ.setdefault("CAI_PRICE_LIMIT", "0")
+        os.environ.setdefault("CAI_PRICE_LIMIT", "10")
 
         is_ollama = "11434" in base_url or os.getenv("ACI_ARENA_CAI_OLLAMA") == "true"
         os.environ["OLLAMA"] = "true" if is_ollama else "false"
@@ -83,33 +117,47 @@ class CAI(BaseMAS):
         }
 
     def _official_model(self, agent_name: str):
+        run = get_run_context() or {}
+        runtime_name = agent_name + "_" + run["run_id"] if run else agent_name
         client = AsyncOpenAI(
             api_key=self.llm_config.get("api_key"),
             base_url=self.llm_config.get("base_url"),
         )
-        return OpenAIChatCompletionsModel(
+        model = ObservedOpenAIChatCompletionsModel(
             model=self.llm_config.get("model_name"),
             openai_client=client,
-            agent_name=agent_name,
+            agent_name=runtime_name,
+            agent_id=runtime_name,
             agent_type=agent_name.lower().replace(" ", "_"),
         )
+        model.completion_budget = int(self.llm_config.get("max_tokens", 4096))
+        return model
 
     def _transform_handoff_input(self, data: HandoffInputData) -> HandoffInputData:
         """Apply the patched ACIArena attack surface before CAI CodeAgent input."""
 
         attack_surface = self.get_agent("codeagent")
         history = data.input_history
+        emit("HANDOFF_START", sender="selection_agent", receiver="codeagent", input_history=history)
+        edge_id = new_edge_id()
+        self._handoff_edge = edge_id
         if isinstance(history, str):
-            transformed_history = attack_surface.run_step(history)
+            with bind_edge(edge_id):
+                transformed_history = attack_surface.run_step(history)
         else:
             mutable_history = [dict(item) for item in history]
             transformed_history = tuple(mutable_history)
             for item in reversed(mutable_history):
                 if item.get("role") == "user" and isinstance(item.get("content"), str):
-                    item["content"] = attack_surface.run_step(item["content"])
+                    with bind_edge(edge_id):
+                        item["content"] = attack_surface.run_step(item["content"])
                     transformed_history = tuple(mutable_history)
                     break
 
+        emit("HANDOFF_TRANSFORM", sender="selection_agent", receiver="codeagent", edge_id=edge_id,
+             before=history, after=transformed_history, changed=history != transformed_history)
+        if self.logger:
+            self.logger.log_message("selection_agent", "codeagent", transformed_history, edge_id=edge_id)
         return HandoffInputData(
             input_history=transformed_history,
             pre_handoff_items=tuple(data.pre_handoff_items),
@@ -119,11 +167,15 @@ class CAI(BaseMAS):
     def _build_runtime(self):
         from cai.agents.codeagent import CodeAgent
 
-        temperature = float(self.llm_config.get("temperature", 0.0))
+        run = get_run_context() or {}
+        suffix = "_" + run["run_id"] if run else ""
+
+        temperature = None if str(self.llm_config.get("model_name", "")).startswith("gpt-5") else float(self.llm_config.get("temperature", 0.0))
         max_tokens = int(self.llm_config.get("max_tokens", 1024))
+        setting_max_tokens = None if str(self.llm_config.get("model_name", "")).startswith("gpt-5") else max_tokens
 
         code_agent = CodeAgent(
-            name="CodeAgent",
+            name="CodeAgent" + suffix,
             model=self._official_model("CodeAgent"),
             instructions=self.get_agent("codeagent").profile,
             tools=[final_answer],
@@ -133,7 +185,7 @@ class CAI(BaseMAS):
         )
         code_agent.model_settings = ModelSettings(
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=setting_max_tokens,
             tool_choice="required",
         )
         code_agent.tool_use_behavior = "stop_on_first_tool"
@@ -147,20 +199,22 @@ class CAI(BaseMAS):
             input_filter=self._transform_handoff_input,
         )
         return Agent(
-            name="Selection Agent",
+            name="Selection Agent" + suffix,
             description="CAI handoff-based routing agent.",
             instructions=self.get_agent("selection_agent").profile,
             handoffs=[code_handoff],
             model=self._official_model("Selection Agent"),
             model_settings=ModelSettings(
                 temperature=temperature,
-                max_tokens=min(max_tokens, 128),
+                max_tokens=min(max_tokens, 128) if setting_max_tokens is not None else None,
                 tool_choice="required",
             ),
         )
 
     def bootstrap(self, query: str):
         self.get_agent("selection_agent").update_memory(role="user", content=query)
+        if self.logger:
+            self.logger.log_message("user", "selection_agent", query)
         return {"query": query, "response": None}, False
 
     def step(self, args):
@@ -179,15 +233,29 @@ class CAI(BaseMAS):
                     new_items=(),
                 )
             )
-            result = await Runner.run(
-                code_agent,
-                handoff_input.input_history,
-                max_turns=self.runtime_max_turns,
-                run_config=RunConfig(
-                    workflow_name="ACIArena CAI",
-                    tracing_disabled=True,
-                ),
-            )
+            with bind_edge(self._handoff_edge):
+                emit("RUNNER_INPUT", agent="codeagent", sender="codeagent", receiver="runner",
+                     input=handoff_input.input_history, system_instructions=code_agent.instructions,
+                     model=self.llm_config.get("model_name"))
+                result = await Runner.run(
+                    code_agent,
+                    handoff_input.input_history,
+                    max_turns=self.runtime_max_turns,
+                    run_config=RunConfig(
+                        workflow_name="ACIArena CAI",
+                        tracing_disabled=True,
+                    ),
+                )
+            emit("RUNNER_OUTPUT", agent="codeagent", sender="runner", receiver="codeagent",
+                 final_output=str(result.final_output), raw_response_count=len(result.raw_responses))
+            emit("AGENT_OUTPUT", agent="codeagent", output=str(result.final_output),
+                 output_source="cai_runner_final")
+            for item in result.new_items:
+                item_type = item.__class__.__name__
+                if item_type == "ToolCallItem":
+                    emit("TOOL_CALL", agent="codeagent", item=str(item))
+                elif item_type == "ToolCallOutputItem":
+                    emit("TOOL_RESULT", agent="codeagent", item=str(item))
             used_tool = any(
                 item.__class__.__name__ == "ToolCallOutputItem"
                 for item in result.new_items
@@ -203,8 +271,11 @@ class CAI(BaseMAS):
             )
             return result, str(packaged)
 
-        result, response = asyncio.run(run_official_cai())
+        timeout = int(os.getenv("ACI_ARENA_CAI_RUN_TIMEOUT", "180"))
+        result, response = asyncio.run(asyncio.wait_for(run_official_cai(), timeout=timeout))
         args["response"] = response
+        if self.logger:
+            self.logger.log_message("codeagent", "system", response)
 
         input_tokens = sum(item.usage.input_tokens for item in result.raw_responses)
         output_tokens = sum(item.usage.output_tokens for item in result.raw_responses)
