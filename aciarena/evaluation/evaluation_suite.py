@@ -7,10 +7,10 @@ import json
 import copy
 import os
 from pathlib import Path
-from collections import Counter
-from aciarena.observability.context import set_run_context, clear_run_context
+from aciarena.observability.context import set_run_context, clear_run_context, set_execution, set_turn, bind_agent
 from aciarena.observability.trace import emit, sanitize
 from aciarena.evaluation.extended_evaluator import evaluate as evaluate_extended
+from aciarena.evaluation.extended_metrics import summarize
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,10 +59,10 @@ class BaseEvaluationSuite:
     def load_math_tasks(self):
         math_data = _load_json(DATASET_DIR / "aciarena_math.json")
 
-        for item in tqdm(math_data, desc="Processing Math Task"):
+        for index, item in tqdm(self._selected_items(math_data), desc="Processing Math Task"):
             problem = item["problem"]
             answer = item["answer"]
-            self.tasks.append(MathTask(query=problem, ground_truth=answer))
+            self._register_task(MathTask(query=problem, ground_truth=answer), index)
     
     def load_code_tasks(self):
         code_data = _load_json(DATASET_DIR / "aciarena_code.json")
@@ -71,10 +71,13 @@ class BaseEvaluationSuite:
             problem  = item["problem"]
             answer = item["answer"]
             task = CodeTask(query=problem, ground_truth=answer)
-            task.dataset_index = index
-            task.task_id = f"T{index + 1:02d}"
-            task.task_name = answer.get("entry_point") or answer.get("task_id") or f"task_{index + 1}"
-            self.tasks.append(task)
+            self._register_task(task, index, answer.get("entry_point") or answer.get("task_id"))
+
+    def _register_task(self, task, index, name=None):
+        task.dataset_index = index
+        task.task_id = f"{self.args.task_domain}_T{index + 1:02d}"
+        task.task_name = str(name or f"{self.args.task_domain}_{index + 1:04d}")
+        self.tasks.append(task)
 
     def _selected_items(self, dataset):
         spec = getattr(self.args, "task_ids", None)
@@ -91,18 +94,18 @@ class BaseEvaluationSuite:
     def load_sci_tasks(self):
         sci_data = _load_json(DATASET_DIR / "aciarena_sci.json")
 
-        for item in tqdm(sci_data, desc="Processing Sci Task"):
-            self.tasks.append(QATask(
+        for index, item in tqdm(self._selected_items(sci_data), desc="Processing Sci Task"):
+            self._register_task(QATask(
                 query=item["problem"], ground_truth=item["answer"]
-            ))
+            ), index)
 
     def load_medicine_tasks(self):
         medicine_data = _load_json(DATASET_DIR / "aciarena_med.json")
 
-        for item in tqdm(medicine_data, desc="Processing Medicine Task"):
-            self.tasks.append(QATask(
+        for index, item in tqdm(self._selected_items(medicine_data), desc="Processing Medicine Task"):
+            self._register_task(QATask(
                 query=item["problem"], ground_truth=item["answer"]
-            ))
+            ), index)
 
     def eval(self):
         """
@@ -113,31 +116,56 @@ class BaseEvaluationSuite:
     def _record_extended(self, finished_tasks, finished_attacks, utility_results, security_results):
         if not getattr(self.args, "trace", False):
             return
+        try:
+            self._write_extended(finished_tasks, finished_attacks, utility_results, security_results)
+        except Exception as exc:
+            # The official suite must still return its original scores even if
+            # the optional measurement/artifact layer fails.
+            self.logger.logger.warning("Extended artifacts incomplete: %s", sanitize(str(exc)))
+        finally:
+            clear_run_context()
+
+    def _write_extended(self, finished_tasks, finished_attacks, utility_results, security_results):
         output_dir = Path("results_extended") / self.args.session_id
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         runs_path = output_dir / "runs.jsonl"
         records = []
+        if not len(finished_tasks) == len(finished_attacks) == len(utility_results) == len(security_results):
+            raise ValueError("Run/task/attack/official result alignment is incomplete")
         for task, attack, utility, security in zip(finished_tasks, finished_attacks, utility_results, security_results):
             answer = attack.answer
             run_error = task.answer.get("_error") or answer.get("_error")
             ctx = answer["_run_context"]
             set_run_context(**ctx)
+            set_turn(answer.get("_round_count", 0))
+            set_execution("evaluation", answer.get("_round_count", 0))
             try:
                 emit("OFFICIAL_ATTACK_VERIFY", result=security)
                 emit("OFFICIAL_TASK_VERIFY", result=utility,
                      raw_response=answer.get("response"),
-                     extracted_answer=getattr(task, "last_extracted_answer", None))
-                extended = evaluate_extended(ctx, attack, answer.get("response"), utility, run_error)
+                     official_extracted_answer=getattr(task, "last_extracted_answer", None))
+                try:
+                    extended = evaluate_extended(ctx, attack, answer.get("response"), utility, run_error)
+                except Exception as exc:
+                    emit("ERROR", stage="extended_evaluation", error_type=type(exc).__name__, message=str(exc))
+                    extended = {"run_validity": "EVALUATION_ERROR", "run_outcome": "MEASUREMENT_INVALID",
+                                "attack_condition": "UNKNOWN", "target_response_state": "UNKNOWN",
+                                "final_payload_state": "UNKNOWN", "intended_attack": attack.attack_surface != "none",
+                                "propagation": {"agent_compromise_ratio": {"numerator": 0, "denominator": 0, "value": None},
+                                                "propagation_depth": None, "trajectory_compromise": False}}
                 emit("EXTENDED_EVAL", **extended)
                 emit("RUN_END", status="error" if run_error else "complete")
                 record = {
-                    "run_id": ctx["run_id"], "task_id": ctx["task_id"],
+                    "session_id": ctx["session_id"], "run_id": ctx["run_id"], "task_id": ctx["task_id"],
+                    "dataset_index": ctx.get("dataset_index"),
                     "task_name": ctx["task_name"], "mas": ctx["mas_name"],
                     "attack": ctx["attack_name"],
+                    "attack_id": ctx["attack_id"], "attack_surface": ctx["attack_surface"],
                     "official": {"attack_verify": security, "task_verify": utility},
                     "extended": extended,
                     "raw_response": answer.get("response"),
-                    "extracted_answer": getattr(task, "last_extracted_answer", None),
+                    "official_extracted_answer": getattr(task, "last_extracted_answer", None),
+                    "official_task_verify": utility,
                 }
                 records.append(sanitize(record))
             finally:
@@ -146,37 +174,35 @@ class BaseEvaluationSuite:
         with os.fdopen(fd, "a", encoding="utf-8") as stream:
             for record in records:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-        summary = {
-            "session_id": self.args.session_id,
-            "run_count": len(records),
-            "official_asr": sum(security_results) / len(security_results) if security_results else None,
-            "official_utility": sum(utility_results) / len(utility_results) if utility_results else None,
-            "valid_runs": sum(r["extended"]["run_validity"] == "VALID" for r in records),
-            "validity_counts": dict(Counter(r["extended"]["run_validity"] for r in records)),
-            "outcome_counts": dict(Counter(r["extended"]["run_outcome"] for r in records)),
-            "final_payload_counts": dict(Counter(r["extended"]["final_payload_state"] for r in records)),
-            "guard_blocks": sum(r["extended"]["guard"]["blocks"] for r in records),
-        }
+        repeats = getattr(self.args, "repeat", 1)
+        intended = len(self.tasks) * repeats * len(self.executor.get_attacks())
+        attack_count = len(self.tasks) * repeats * sum(a.attack_surface != "none" for a in self.executor.get_attacks())
+        summary = summarize(records, intended, attack_count)
+        summary["session_id"] = self.args.session_id
         summary_path = output_dir / "summary.json"
         fd = os.open(summary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(summary, stream, ensure_ascii=False, indent=2)
 
     def _safe_verify(self, item, kind):
+        answer = item.answer
+        ctx = answer.get("_run_context") if isinstance(answer, dict) else None
+        if ctx:
+            set_run_context(**ctx)
+            set_turn(answer.get("_round_count", 0))
+            set_execution("evaluation", answer.get("_round_count", 0))
         try:
-            return item.verify()
+            with bind_agent(f"official_{kind}_evaluator"):
+                return item.verify()
         except Exception as exc:
             answer = item.answer
             if isinstance(answer, dict):
                 answer["_error"] = {"stage": "evaluation", "error_type": type(exc).__name__, "message": str(exc)}
-                ctx = answer.get("_run_context")
                 if ctx:
-                    set_run_context(**ctx)
-                    try:
-                        emit("ERROR", verifier=kind, **answer["_error"])
-                    finally:
-                        clear_run_context()
+                    emit("ERROR", verifier=kind, **answer["_error"])
             return 0.0
+        finally:
+            clear_run_context()
 
 @register_suite("benign")
 class BenignSuite(BaseEvaluationSuite):
@@ -186,6 +212,7 @@ class BenignSuite(BaseEvaluationSuite):
     def eval(self):
         utility_results = []
         finished_tasks = []
+        finished_attacks = []
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {executor.submit(self.executor.execute, mas_config=self.mas_config, task=task): task for task in self.tasks}
@@ -193,6 +220,7 @@ class BenignSuite(BaseEvaluationSuite):
             for future in tqdm(as_completed(futures), total=len(futures), desc="Executing Tasks"):
                 results = future.result()
                 task = futures[future]
+                finished_attacks.extend(results["attacks"])
                 
                 for utility_result in results["utility"]:
                     new_task = copy.deepcopy(task)
@@ -202,6 +230,8 @@ class BenignSuite(BaseEvaluationSuite):
         for task in tqdm(finished_tasks, desc="Evaluating Utility"):
             utility = self._safe_verify(task, "task")
             utility_results.append(utility)
+
+        self._record_extended(finished_tasks, finished_attacks, utility_results, [None] * len(finished_tasks))
 
         return {
             "Benign Utility": f"{100 * sum(utility_results) / len(utility_results):.4f}",

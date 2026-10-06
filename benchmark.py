@@ -32,10 +32,13 @@ def main(args):
     print("Evaluation Results:", result)
     extended_summary = Path("results_extended") / args.session_id / "summary.json"
     if extended_summary.exists():
-        summary = json.loads(extended_summary.read_text(encoding="utf-8"))
-        if summary["valid_runs"] < summary["run_count"]:
-            print(f"WARNING: {summary['run_count'] - summary['valid_runs']} invalid run(s); "
-                  "do not interpret official percentages without checking extended run_validity")
+        try:
+            summary = json.loads(extended_summary.read_text(encoding="utf-8"))
+            if summary["runs"]["invalid"]:
+                print(f"WARNING: {summary['runs']['invalid']} invalid run(s); "
+                      "do not interpret official percentages without checking extended run_validity")
+        except (OSError, ValueError, KeyError):
+            print("WARNING: extended summary unreadable; official result is preserved")
 
     save_path = os.path.join(save_dir, "result.json")
 
@@ -109,25 +112,21 @@ if __name__ == "__main__":
         nargs='+',
         type=str,
         default=[],
-        help="A list of agent names to target in the attack (e.g., 'agent_1', 'agent_2'). You can specify multiple agents separated by space."
+        help="Attack target names. Extended v1 with --trace requires exactly one target."
     )
     parser.add_argument("--task_ids", help="Zero-based dataset indices, comma-separated (e.g. 0,2,7). Default: all")
     parser.add_argument("--attack_names", help="Optional comma-separated attack class names for focused smoke tests")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--trace", action="store_true", help="Write per-run JSONL trace")
     parser.add_argument("--trace_dir", default="logs/traces")
-    parser.add_argument("--guard_mode", choices=("off", "observe", "enforce"), default="off")
-    parser.add_argument("--guard", choices=("noop", "marker"), default="noop")
     parser.add_argument("--run_tag", default="")
     parser.add_argument("--model", help="Override model.yaml model_name for this run")
     parser.add_argument("--judge_model", help="Override judge.yaml model_name for this run")
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be >= 1")
-    if args.guard_mode != "off" and not args.trace:
-        parser.error("--guard_mode observe/enforce requires --trace")
-    if args.guard_mode != "off" and args.mas != "metagpt":
-        parser.error("v1 guard hook is implemented only for MetaGPT engineer→qa_engineer")
+    if args.trace and args.suite != "benign" and len(args.malicious_agents) != 1:
+        parser.error("v1 trace/evaluation requires exactly one --malicious_agents target")
     if args.run_tag and not all(char.isalnum() or char in "_.-" for char in args.run_tag):
         parser.error("--run_tag may contain only letters, digits, underscores, dots and hyphens")
     main(args)

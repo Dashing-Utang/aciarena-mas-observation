@@ -36,9 +36,9 @@ source .env
 set +a
 ```
 
-`configs/model.yaml` uses Claude as the system under test through Anthropic's
-OpenAI SDK compatibility endpoint. `configs/judge.yaml` uses OpenAI as the
-separate judge.
+`configs/model.yaml` configures the system under test; `configs/judge.yaml`
+configures the separate judge. This checkout uses OpenAI for both. Run-specific
+model names can be selected with `--model` and `--judge_model`.
 
 ### 2. Run Evaluation
 ```bash
@@ -65,3 +65,13 @@ python3 benchmark.py \
 ```
 
 The adapter is located in `aciarena/mas/cai/`.
+
+## ACIArena-Extended v1 (measurement only)
+
+The `feature/aciarena-extended-v1` branch adds isolated execution traces and a
+separate four-axis evaluator. It does not add Guardrails or replace official
+ACIArena scoring. See [the schema, metric denominators and smoke commands](docs/extended_v1.md)
+and [the verified implementation report](analysis/measurement_v1_report_2026-10-06.md).
+The [live GPT-5 nano smoke report](analysis/live_nano_smoke_2026-10-06.md)
+separates real model outputs from official scores and documents remaining
+semantic-classifier coverage gaps.

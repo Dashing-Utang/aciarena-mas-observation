@@ -31,7 +31,10 @@ class CAMEL(BaseMAS):
         return self.logger.log_message(sender=sender, receiver=receiver, message=message)
 
     def _check_termination(self, response):
-        return self.is_termination_msg in response
+        done = self.is_termination_msg in response
+        if done:
+            self.termination_reason = "CAMEL_TASK_DONE"
+        return done
 
     def _set_assistant_profile(self, role_profile):
         assistant = self.get_agent("assistant")

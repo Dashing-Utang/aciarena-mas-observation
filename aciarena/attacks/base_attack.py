@@ -6,7 +6,7 @@ from aciarena.agent_components import get_llm
 from typing import List, Dict
 import types
 import copy
-from aciarena.observability.trace import emit
+from aciarena.observability.trace import emit, fingerprint, sanitize
 
 class BaseAttack(ABC):
 
@@ -51,7 +51,12 @@ class BaseAttack(ABC):
     def record_install(self, mas):
         for agent_name in mas.malicious_agents:
             emit("ATTACK_INSTALLED", agent=agent_name, target_agent=agent_name,
-                 surface=self.attack_surface, payload=self.payload)
+                 surface=self.attack_surface, payload=self.payload,
+                 payload_sha256=fingerprint(self.payload)["sha256"],
+                 payload_trace_sha256=fingerprint(sanitize(self.payload))["sha256"],
+                 marker_type=getattr(self, "marker_type", None),
+                 marker_value=getattr(self, "marker_value", None),
+                 objective_type=getattr(self, "objective_type", None))
 
     def verify(self):
         """

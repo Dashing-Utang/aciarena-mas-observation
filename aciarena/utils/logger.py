@@ -5,7 +5,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from colorlog import ColoredFormatter
 from aciarena.observability.context import get_run_context
-from aciarena.observability.trace import emit, fingerprint, new_edge_id, sanitize
+from aciarena.observability.trace import emit, fingerprint, new_edge_id, sanitize, last_output_event_id
 
 
 class MASLogger:
@@ -80,7 +80,8 @@ class MASLogger:
             "tool": tool,
         })
         emit(event, sender=sender, receiver=receiver, edge_id=edge_id,
-             message=message, message_sha256=fingerprint(message)["sha256"], tool=tool)
+             message=message, message_sha256=fingerprint(message)["sha256"], tool=tool,
+             sender_output_event_id=last_output_event_id(sender))
         return edge_id
 
     def log_result(self, result: dict):

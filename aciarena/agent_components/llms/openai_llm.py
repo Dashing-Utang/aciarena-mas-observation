@@ -3,7 +3,7 @@ from openai import OpenAI, AsyncOpenAI
 from openai import OpenAIError, RateLimitError, APIConnectionError, Timeout, BadRequestError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential, AsyncRetrying, RetryError
 from pydantic import BaseModel
-from aciarena.observability.trace import emit
+from aciarena.observability.trace import emit, record_llm_request, record_agent_output
 
 class AgentResponseSchema(BaseModel):
     response: str
@@ -57,18 +57,18 @@ class OpenAILLM(BaseLLM):
             params["response_format"] = {"type": "json_object"}
         
         try:
-            emit("LLM_REQUEST", model=self.model_name, messages=messages)
+            request_id = record_llm_request(self.model_name, messages)
             if is_multi_options and option_num is not None:
                 params["n"] = option_num
                 response = self.client.chat.completions.create(**params)
                 self.calculate_token_usage(response)
-                emit("AGENT_OUTPUT", output=[choice.message.content for choice in response.choices])
+                record_agent_output([choice.message.content for choice in response.choices], request_id)
                 return response
             else:    
                 response = self.client.chat.completions.create(**params)
                 self.calculate_token_usage(response)
                 output = response.choices[0].message.content if response.choices else "[Empty response]"
-                emit("AGENT_OUTPUT", output=output)
+                record_agent_output(output, request_id)
                 return output
         except BadRequestError as e:
             raise RuntimeError(f"Bad request to OpenAI API: {e}")
@@ -95,10 +95,10 @@ class OpenAILLM(BaseLLM):
                             temperature=self.temperature,
                             seed=self.seed,
                         )
-                    emit("LLM_REQUEST", model=self.model_name, messages=messages)
+                    request_id = record_llm_request(self.model_name, messages)
                     response = await self.async_client.chat.completions.create(**params)
             output = response.choices[0].message.content if response.choices else "[Empty response]"
-            emit("AGENT_OUTPUT", output=output)
+            record_agent_output(output, request_id)
             return output
         except BadRequestError as e:
             raise RuntimeError(f"Bad request to OpenAI API: {e}")

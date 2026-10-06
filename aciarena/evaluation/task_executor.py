@@ -7,7 +7,8 @@ from aciarena.utils.factory import register_executor, build_mas
 from typing import List, Dict
 import types
 import copy
-from aciarena.observability.context import clear_run_context, set_run_context, set_turn
+from collections import Counter
+from aciarena.observability.context import clear_run_context, set_run_context, set_turn, set_execution, get_run_context, get_phase
 from aciarena.observability.trace import emit
 
 class BaseExecutor(ABC):
@@ -86,12 +87,21 @@ class ContinuousAttackExecutor(BaseExecutor):
         results = []
         finished_attacks = []
         attacks = copy.deepcopy(self.attacks)
+        attack_name_counts = Counter(a.__class__.__name__ for a in attacks)
         run_args = mas_config["args"]
+        if getattr(run_args, "trace", False) and run_args.suite != "benign" and len(run_args.malicious_agents) != 1:
+            raise ValueError("v1 trace/evaluation requires exactly one attack target")
         for repetition in range(1, getattr(run_args, "repeat", 1) + 1):
-            for attack in attacks:
+            for attack_index, attack in enumerate(attacks, 1):
                 turn = 0
-                task_id = getattr(task, "task_id", "T01")
-                run_id = f"{task_id}_{attack.__class__.__name__}_r{repetition:02d}"
+                task_id = getattr(task, "task_id", None)
+                if task_id is None:
+                    raise ValueError("Every task must have a dataset-scoped task_id")
+                session_id = getattr(run_args, "session_id", "manual")
+                attack_id = attack.__class__.__name__
+                if attack_name_counts[attack_id] > 1:
+                    attack_id += f"_a{attack_index:02d}"
+                run_id = f"{session_id}_{run_args.mas}_{task_id}_{attack_id}_r{repetition:02d}"
                 tag = getattr(run_args, "run_tag", "")
                 if tag:
                     run_id += "_" + tag
@@ -104,22 +114,24 @@ class ContinuousAttackExecutor(BaseExecutor):
                     "mas_name": run_args.mas,
                     "suite": run_args.suite,
                     "task_domain": run_args.task_domain,
-                    "attack_id": attack.__class__.__name__,
+                    "attack_id": attack_id,
                     "attack_name": attack.__class__.__name__,
                     "attack_surface": attack.attack_surface,
                     "trace": getattr(run_args, "trace", False),
                     "trace_dir": getattr(run_args, "trace_dir", "logs/traces"),
-                    "guard_mode": getattr(run_args, "guard_mode", "off"),
-                    "guard": getattr(run_args, "guard", "noop"),
                 }
                 set_run_context(**ctx)
+                ctx = get_run_context()
                 args = {"query": task.get_query(), "response": ""}
                 error = None
                 try:
                     emit("RUN_START", model=mas_config["llm_config"].get("model_name"),
                          judge_model=attack.llm_judge.model_name, task_query=task.get_query(),
                          target_agents=run_args.malicious_agents, max_workers=run_args.max_workers,
-                         guard=ctx["guard"], attack_payload=attack.payload,
+                         intended_attack=attack.attack_surface != "none", attack_payload=attack.payload,
+                         attack_metadata={"marker_type": getattr(attack, "marker_type", None),
+                                          "marker_value": getattr(attack, "marker_value", None),
+                                          "objective_type": getattr(attack, "objective_type", None)},
                          commit_sha=getattr(run_args, "commit_sha", None),
                          worktree_dirty=getattr(run_args, "worktree_dirty", None))
                     mas = build_mas(args=run_args, llm_config=mas_config["llm_config"],
@@ -130,25 +142,39 @@ class ContinuousAttackExecutor(BaseExecutor):
                         for agent in mas.agents.values():
                             agent.profile = f"{user_information}\n{agent.profile}"
                             agent.user_information = user_information
-                    emit("BOOTSTRAP_START")
+                    set_execution("bootstrap", 0)
                     args, terminate = mas.bootstrap(task.get_query())
                     if not terminate:
                         for turn in range(1, mas.max_turn + 1):
                             set_turn(turn)
+                            set_execution("step", turn)
                             args, terminate = mas.step(args)
                             if terminate:
                                 break
+                            if getattr(mas, "termination_reason", None) == "QA_REQUESTED_REVISION":
+                                emit("TERMINATION", reason="QA_REQUESTED_REVISION", terminal=False)
+                    reason = getattr(mas, "termination_reason", None) if terminate else "MAX_TURN"
+                    if not str(args.get("response") or "").strip():
+                        reason = "EMPTY_RESPONSE"
+                    emit("TERMINATION", reason=reason or "MAX_TURN", terminal=True, max_turn=mas.max_turn)
+                    args["_termination_reason"] = reason or "MAX_TURN"
+                    args["_round_count"] = turn
+                    set_execution("conclude", turn)
                     args = mas.conclude(args)
                     args["token_usage"] = mas.get_token_usage()
                 except Exception as exc:
-                    error = {"stage": "execution", "error_type": type(exc).__name__, "message": str(exc)}
+                    error = {"stage": get_phase(), "error_type": type(exc).__name__, "message": str(exc)}
                     emit("ERROR", **error)
+                    emit("TERMINATION", reason="ERROR", terminal=True)
+                    args["_termination_reason"] = "ERROR"
+                    args["_round_count"] = turn
                     args["response"] = str(args.get("response") or "")
                 finally:
                     args["query"] = task.get_query()
                     args["ground_truth"] = task.get_gt()
                     args["_run_context"] = ctx
                     args["_error"] = error
+                    set_execution("conclude", turn)
                     emit("FINAL_RESPONSE", response=args.get("response", ""))
                     attack.set_turn(turn)
                     attack.set_answer(args)

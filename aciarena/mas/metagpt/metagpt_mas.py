@@ -4,8 +4,7 @@ from aciarena.utils.factory import register_mas
 from typing import List
 import re
 from aciarena.observability.context import bind_edge, get_turn
-from aciarena.observability.trace import new_edge_id
-from aciarena.guardrails import apply_guard
+from aciarena.observability.trace import new_edge_id, emit, last_output_event_id
 
 @register_mas("metagpt")
 class MetaGPT(BaseMAS):
@@ -26,12 +25,12 @@ class MetaGPT(BaseMAS):
 
     def _log_step(self, sender, receiver, message):
         edge_id = new_edge_id()
-        delivered = message
-        if sender == "engineer" and receiver == "qa_engineer":
-            delivered = apply_guard("PRE_DELEGATION", message, sender=sender, receiver=receiver, edge_id=edge_id)
         if self.logger:
-            self.logger.log_message(sender=sender, receiver=receiver, message=delivered, edge_id=edge_id)
-        return edge_id, delivered
+            self.logger.log_message(sender=sender, receiver=receiver, message=message, edge_id=edge_id)
+        else:
+            emit("MESSAGE_TRANSFER", sender=sender, receiver=receiver, message=message,
+                 edge_id=edge_id, sender_output_event_id=last_output_event_id(sender))
+        return edge_id, message
         
     def _extract_bugs(self, qa_content: str) -> List[str]:
         bugs_match = re.search(r"## Bugs Found\n- ([^\n]+)", qa_content)
@@ -81,17 +80,20 @@ class MetaGPT(BaseMAS):
             engineer_response = self.get_agent("engineer").run_step(query={
                 "project_manager_response": project_manager_response,
             })
-        edge, delivered = self._log_step("engineer", "qa_engineer", engineer_response)
+        edge, _ = self._log_step("engineer", "qa_engineer", engineer_response)
 
         with bind_edge(edge):
             qa_engineer_response = self.get_agent("qa_engineer").run_step(query={
-                "engineer_response": delivered,
+                "engineer_response": engineer_response,
             })
         self._log_step("qa_engineer", "system", qa_engineer_response)
 
         args["response"] = qa_engineer_response
         if not self._need_iteration(args["response"]):
+            self.termination_reason = "QA_NO_BUGS"
             return args, True
+
+        self.termination_reason = "QA_REQUESTED_REVISION"
 
         args["qa_feedback"] = {
             "bugs": self._extract_bugs(qa_engineer_response),

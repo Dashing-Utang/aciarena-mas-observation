@@ -12,7 +12,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .context import get_agent, get_edge, get_run_context, get_turn
+from .context import get_agent, get_edge, get_run_context, get_turn, get_phase, get_round
+
+EVENT_TYPES = frozenset({
+    "RUN_START", "ATTACK_INSTALLED", "ATTACK_APPLIED", "MESSAGE_TRANSFER",
+    "LLM_REQUEST", "AGENT_OUTPUT", "HANDOFF_START", "HANDOFF_TRANSFORM",
+    "RUNNER_INPUT", "RUNNER_OUTPUT", "TOOL_CALL", "TOOL_RESULT", "TERMINATION",
+    "FINAL_RESPONSE", "OFFICIAL_ATTACK_VERIFY", "OFFICIAL_TASK_VERIFY",
+    "EXTENDED_EVAL", "ERROR", "RUN_END",
+})
 
 
 _SECRET = re.compile(
@@ -72,13 +80,15 @@ def emit(event_type, *, agent=None, sender=None, receiver=None, edge_id=None, **
     ctx = get_run_context()
     if not ctx or not ctx.get("trace", False):
         return None
+    state = ctx["_trace_state"]
     record = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_id": new_event_id(),
         "session_id": ctx["session_id"],
         "run_id": ctx["run_id"],
         "task_id": ctx["task_id"],
+        "dataset_index": ctx.get("dataset_index"),
         "task_name": ctx.get("task_name"),
         "mas": ctx["mas_name"],
         "suite": ctx["suite"],
@@ -87,21 +97,49 @@ def emit(event_type, *, agent=None, sender=None, receiver=None, edge_id=None, **
         "attack_name": ctx["attack_name"],
         "attack_surface": ctx.get("attack_surface"),
         "turn": get_turn(),
+        "phase": get_phase(),
+        "round": get_round(),
         "edge_id": edge_id if edge_id is not None else get_edge(),
         "event_type": event_type,
         "agent": agent if agent is not None else get_agent(),
         "sender": sender,
         "receiver": receiver,
-        "guard_mode": ctx.get("guard_mode", "off"),
-        "data": sanitize(data),
+        "data": None,
     }
-    path = trace_path(ctx)
-    with _lock:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as stream:
-            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    try:
+        if event_type not in EVENT_TYPES:
+            raise ValueError("Unsupported trace event type")
+        record["data"] = sanitize(data)
+        path = trace_path(ctx)
+        with _lock:
+            state["sequence"] += 1
+            record["sequence"] = state["sequence"]
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            if event_type == "AGENT_OUTPUT":
+                state["outputs"][record["agent"]] = record["event_id"]
+    except Exception as exc:
+        # Recording failure must not alter an agent's input, response or control flow.
+        state["write_errors"].append({"error_type": type(exc).__name__})
+        return None
     return record["event_id"]
+
+
+def last_output_event_id(agent):
+    ctx = get_run_context()
+    return ctx["_trace_state"]["outputs"].get(agent) if ctx else None
+
+
+def record_llm_request(model, messages, *, agent=None, **data):
+    return emit("LLM_REQUEST", agent=agent, model=model, messages=messages,
+                messages_sha256=fingerprint(messages)["sha256"], **data)
+
+
+def record_agent_output(output, request_event_id=None, *, agent=None, **data):
+    return emit("AGENT_OUTPUT", agent=agent, output=output,
+                request_event_id=request_event_id, output_sha256=fingerprint(output)["sha256"], **data)
 
 
 def read_trace(context):
