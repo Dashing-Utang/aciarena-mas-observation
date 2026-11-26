@@ -9,9 +9,10 @@ import types
 import copy
 from collections import Counter
 from contextlib import nullcontext
-from aciarena.observability.context import clear_run_context, set_run_context, set_turn, set_execution, get_run_context, get_phase
+from aciarena.observability.context import bind_agent, clear_run_context, set_run_context, set_turn, set_execution, get_run_context, get_phase
 from aciarena.observability.trace import emit, release_redactions
 from aciarena.evaluation.answer_release import BERT_BLOCK, generate_task_answer, release_task_answer
+from aciarena.mas.metagpt.math_profile import configure_task_profile
 
 def _filter_responses(filter_text):
     """Apply a text guard to each CAMEL option or to a scalar agent reply."""
@@ -39,7 +40,8 @@ class BaseExecutor(ABC):
 
                 def filter_text(response):
                     safety_filter = ACISentinel(task_description, getattr(args, "judge_model", None))
-                    return safety_filter(response)
+                    with bind_agent("defense_aci_sentinel"):
+                        return safety_filter(response)
 
                 agent.post_step = types.MethodType(_filter_responses(filter_text), agent)
 
@@ -141,9 +143,16 @@ class ContinuousAttackExecutor(BaseExecutor):
                 args = {"query": original_query, "response": ""}
                 error = None
                 release_values = mas_config.get("release_values", ())
-                catalog = mas_config.get("public_code_tasks")
+                catalog = mas_config.get("public_tasks", mas_config.get("public_code_tasks"))
                 redact_token = release_redactions.set(release_values)
                 delivered = ""
+                release_attempts = []
+                task_profile = "aciarena_default"
+
+                def record_release(**fields):
+                    release_attempts.append(fields)
+                    emit("ANSWER_RELEASE", **fields)
+
                 try:
                     emit("RUN_START", model=mas_config["llm_config"].get("model_name"),
                          judge_model=attack.llm_judge.model_name, task_query=original_query,
@@ -156,6 +165,7 @@ class ContinuousAttackExecutor(BaseExecutor):
                          worktree_dirty=getattr(run_args, "worktree_dirty", None))
                     mas = build_mas(args=run_args, llm_config=mas_config["llm_config"],
                                     logger=mas_config["logger"])
+                    task_profile = configure_task_profile(mas, run_args.mas, run_args.task_domain)
                     attack.run(mas)
                     mas = self.load_defense(run_args, original_query, mas)
                     if user_information:
@@ -189,7 +199,7 @@ class ContinuousAttackExecutor(BaseExecutor):
                         args = mas.conclude(args)
                         args["token_usage"] = mas.get_token_usage()
                         recover = getattr(run_args, "answer_recovery", False)
-                        if recover or run_args.defense == "agrail":
+                        if recover or release_values or run_args.defense == "agrail":
                             publication_guard = None
                             if run_args.defense == "agrail":
                                 from aciarena.defenses.agrail import AGrailPublicationGuard
@@ -200,7 +210,11 @@ class ContinuousAttackExecutor(BaseExecutor):
                             def regenerate(query):
                                 llm = get_llm(mas_config["llm_config"])
                                 try:
-                                    return generate_task_answer(llm, query, run_args.defense, judge_model=getattr(run_args, "judge_model", None))
+                                    return generate_task_answer(
+                                        llm, query, run_args.defense,
+                                        judge_model=getattr(run_args, "judge_model", None),
+                                        domain=run_args.task_domain,
+                                    )
                                 finally:
                                     usage = args["token_usage"]
                                     usage["input_tokens"] += llm.input_tokens
@@ -212,11 +226,9 @@ class ContinuousAttackExecutor(BaseExecutor):
                                 defense=run_args.defense, generate=regenerate if recover else None, original=original_query,
                                 publication_guard=publication_guard,
                                 task_id=task_id, catalog=catalog, protected_values=release_values,
-                                record=lambda **fields: emit("ANSWER_RELEASE", **fields),
+                                record=record_release,
                             )
                             args["response"] = delivered
-                        elif release_values:
-                            delivered = binding.release_response(args["response"])
                 except Exception as exc:
                     error = {"stage": get_phase(), "error_type": type(exc).__name__, "message": str(exc)}
                     emit("ERROR", **error)
@@ -238,6 +250,13 @@ class ContinuousAttackExecutor(BaseExecutor):
                     args["ground_truth"] = task.get_gt()
                     args["_run_context"] = ctx
                     args["_error"] = error
+                    args["_execution_error"] = error
+                    args["_task_profile"] = task_profile
+                    args["_release_attempts"] = release_attempts
+                    args["_defense_blocked"] = error is None and (
+                        (bool(release_attempts) and release_attempts[-1]["disposition"] in {"held", "blocked"})
+                        or (run_args.defense == "bert_detector" and str(args["response"]).strip() == BERT_BLOCK)
+                    )
                     set_execution("conclude", turn)
                     emit("FINAL_RESPONSE", response=args.get("response", ""))
                     attack.set_turn(turn)

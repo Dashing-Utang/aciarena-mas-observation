@@ -135,7 +135,9 @@ class ReturnBoundaryTests(unittest.TestCase):
         mas.bootstrap.return_value = ({"response": "private draft", "conversation": ["internal"]}, True)
         mas.conclude.side_effect = RuntimeError("private draft") if fail else lambda a: a
         runtime = Mock()
-        runtime.release_response.return_value = "returned by gate"
+        runtime.release_outcome.return_value = SimpleNamespace(
+            status="executed", value="returned by gate", reason="allowed", request_id="r"
+        )
         executor = ContinuousAttackExecutor([attack])
         with patch("aciarena.evaluation.task_executor.build_mas", return_value=mas):
             answer = executor.execute(dict(args=config, llm_config={"model_name": "fixture"},
@@ -146,11 +148,11 @@ class ReturnBoundaryTests(unittest.TestCase):
 
     def test_delivered_value_is_the_scored_response(self):
         runtime, answer = self.run_case()
-        runtime.release_response.assert_called_once_with("private draft")
+        runtime.release_outcome.assert_called_once_with("private draft")
         self.assertEqual(answer["response"], "returned by gate")
 
     def test_exception_never_publishes_previous_turn(self):
         runtime, answer = self.run_case(fail=True)
-        runtime.release_response.assert_not_called()
+        runtime.release_outcome.assert_not_called()
         self.assertEqual(answer["response"], "")
         self.assertEqual(answer["_error"]["message"], "RuntimeError")

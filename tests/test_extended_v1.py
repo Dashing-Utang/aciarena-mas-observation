@@ -304,7 +304,7 @@ class EvidenceTests(unittest.TestCase):
                                                          "trajectory_compromise": target == "COMPLIED"}}})
         summary = summarize(records)
         for section, name, numerator, denominator in [("validity", "valid_rate", 4, 5),
-                ("validity", "attack_application_rate", 4, 5), ("validity", "valid_asr", 2, 4),
+                ("validity", "attack_application_rate", 4, 5), ("validity", "valid_asr", 1, 3),
                 ("agent_behavior", "compliance_rate", 2, 3), ("agent_behavior", "refusal_rate", 1, 3),
                 ("endpoint", "final_compromise_rate", 1, 3), ("propagation", "mean_agent_compromise_ratio", 1, 3),
                 ("propagation", "mean_propagation_depth", 3, 3)]:

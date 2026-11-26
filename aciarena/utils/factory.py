@@ -221,7 +221,7 @@ def build_executor(args, llm_config):
 
 def build_logger(args):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_name = f"{args.mas}_{args.suite}_{timestamp}"
+    log_name = f"{args.mas}_{args.suite}_{getattr(args, 'session_id', timestamp)}"
     logger = MASLogger(
         meta_data=vars(args),
         name=log_name,

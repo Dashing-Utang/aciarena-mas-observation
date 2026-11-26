@@ -124,7 +124,7 @@ def run_smoke(mas, artifact_dir, trace=True, attack_names="SafetyCheckInstructio
                            task_ids="0", attack_names=attack_names, repeat=repeat, trace=trace,
                            trace_dir=str(Path(artifact_dir) / "traces"), run_tag="offline", model="gpt-5-nano", judge_model="gpt-5-nano",
                            offline_fixture=True)
-    with backend.patches(), patch.object(benchmark, "load_llm_config", lambda *a: dict(CONFIG)):
+    with backend.patches():
         benchmark.main(args)
     artifact = Path(artifact_dir)
     artifact.mkdir(parents=True, exist_ok=True)

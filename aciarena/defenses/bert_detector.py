@@ -1,7 +1,5 @@
-from transformers import pipeline
 from typing import Literal
 import threading
-import torch
 import os
 
 
@@ -57,6 +55,9 @@ class BertDetector:
     
     def _load_model(self):
         """Load BERT model and create inference pipeline with device safety"""
+        import torch
+        from transformers import pipeline
+
         with self._device_lock:
             try:
                 # Force CPU usage to avoid CUDA meta tensor issues
@@ -70,7 +71,8 @@ class BertDetector:
                     "text-classification", 
                     model=self.model_name, 
                     device=device,
-                    trust_remote_code=True,
+                    revision="90c9989b1a342275dd0d1a95aad283c04e075671",
+                    trust_remote_code=False,
                     model_kwargs={
                         "torch_dtype": torch.float32,
                         "low_cpu_mem_usage": True,
@@ -97,7 +99,8 @@ class BertDetector:
                     self.pipeline = pipeline(
                         "text-classification", 
                         model=self.model_name,
-                        trust_remote_code=True,
+                        revision="90c9989b1a342275dd0d1a95aad283c04e075671",
+                        trust_remote_code=False,
                         torch_dtype=torch.float32
                     )
                     print(f"BERT detector loaded (fallback): {self.model_name}")
@@ -131,10 +134,8 @@ class BertDetector:
             
             return is_injection, safety_score
             
-        except Exception as e:
-            print(f"Error in BERT detection: {e}")
-            # Return safe default (assume no injection) if detection fails
-            return False, 0.5
+        except Exception as exc:
+            raise RuntimeError("BERT classification failed") from exc
     
     def __call__(self, text: str) -> tuple[bool, float]:
         """

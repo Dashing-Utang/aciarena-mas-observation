@@ -66,11 +66,52 @@ python3 benchmark.py \
 
 The adapter is located in `aciarena/mas/cai/`.
 
-## ACIArena-Extended v1 (measurement only)
+## Guardrail comparison
 
-The `feature/aciarena-extended-v1` branch adds isolated execution traces and a
-separate four-axis evaluator. It does not add Guardrails or replace official
-ACIArena scoring. See [the schema, metric denominators and smoke commands](docs/extended_v1.md)
+Use Python 3.12 for the comparison environment. Install the BERT dependencies
+and SubAgentShield, then install the pinned AGrail source:
+
+```bash
+pip install -e '.[bert]' -e ../subagentShield
+python -m aciarena.defenses.agrail --install-source
+```
+
+`--compare` runs one suite with identical task selection, model and judge
+settings across none, BERT, ACI-Sentinel, AGrail publication and Shield Release.
+`--answer-recovery` adds a separate Shield Release arm with one task-only retry.
+Configure the model and judge credentials and `TYPESAFE_API_KEY` before running.
+The comparison checks the guard dependencies and probes JEV with a synthetic
+request. Code comparisons use the existing Linux/Python 3.12 isolated official
+grader and run its local preflight.
+
+```bash
+python benchmark.py --compare --mas metagpt --suite benign --task_domain sci \
+  --task_ids 0,1 --repeat 1 --answer-recovery \
+  --shield-policy ../subagentShield/configs/policies/mas-runtime-release-v1.json \
+  --shield-release-config ../subagentShield/configs/output-release-recovery.json
+```
+
+Run the benign suite for benign utility and the selected attack suite for
+utility under attack and ASR. Attack comparisons require a single target.
+MetaGPT math uses the `metagpt_math_v1` role profile across all arms. Compare
+the same task and target selections per arm and report each suite's coverage.
+
+Each run writes `result.json` in its own session directory. Comparisons write
+an index at `results_extended/comparisons/<id>/summary.json` with each arm's
+official scores, extended metrics, and result path. Check execution errors,
+verification errors, defense blocks, attack application counts and the valid
+ASR denominator alongside the official numbers. The recovery counts record
+new attempts, delivered answers and delivered correct answers.
+
+The published QA prompts and scorer are used by default. The QA summary also
+records an always-A baseline and utility from explicit option answers. Use
+`--qa-shuffle-seed 37` for a separate, reproducible QA variant with remapped
+answer labels. Its results record the shuffle seed.
+
+## ACIArena-Extended v1
+
+The branch adds isolated execution traces and a separate four-axis evaluator.
+See [the schema, metric denominators and smoke commands](docs/extended_v1.md)
 and [the verified implementation report](analysis/measurement_v1_report_2026-10-06.md).
 The [live GPT-5 nano smoke report](analysis/live_nano_smoke_2026-10-06.md)
 separates real model outputs from official scores and documents remaining

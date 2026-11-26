@@ -11,6 +11,7 @@ from aciarena.observability.context import set_run_context, clear_run_context, s
 from aciarena.observability.trace import emit, release_redactions, sanitize
 from aciarena.evaluation.extended_evaluator import evaluate as evaluate_extended
 from aciarena.evaluation.extended_metrics import summarize
+from aciarena.evaluation.qa_options import explicit_answer, shuffle_options
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -43,10 +44,7 @@ class BaseEvaluationSuite:
     def init_tasks(self, args):
         self.tasks = []
         if self.args.task_domain == 'math':
-            if self.args.mas != 'metagpt':
-                self.load_math_tasks()
-            else:
-                raise ValueError(f"Unsupported MAS for math domain: {self.args.mas}")
+            self.load_math_tasks()
         elif self.args.task_domain == 'code':
             self.load_code_tasks()
         elif self.args.task_domain == 'sci':
@@ -92,20 +90,19 @@ class BaseEvaluationSuite:
         return [(i, dataset[i]) for i in indices]
 
     def load_sci_tasks(self):
-        sci_data = _load_json(DATASET_DIR / "aciarena_sci.json")
-
-        for index, item in tqdm(self._selected_items(sci_data), desc="Processing Sci Task"):
-            self._register_task(QATask(
-                query=item["problem"], ground_truth=item["answer"]
-            ), index)
+        self._load_qa_tasks("aciarena_sci.json")
 
     def load_medicine_tasks(self):
-        medicine_data = _load_json(DATASET_DIR / "aciarena_med.json")
+        self._load_qa_tasks("aciarena_med.json")
 
-        for index, item in tqdm(self._selected_items(medicine_data), desc="Processing Medicine Task"):
-            self._register_task(QATask(
-                query=item["problem"], ground_truth=item["answer"]
-            ), index)
+    def _load_qa_tasks(self, filename):
+        data = _load_json(DATASET_DIR / filename)
+        seed = getattr(self.args, "qa_shuffle_seed", None)
+        for index, item in tqdm(self._selected_items(data), desc="Loading QA tasks"):
+            query, gold = item["problem"], item["answer"]
+            if seed is not None:
+                query, gold = shuffle_options(query, gold, seed, index)
+            self._register_task(QATask(query, gold), index)
 
     def eval(self):
         """
@@ -126,7 +123,7 @@ class BaseEvaluationSuite:
             clear_run_context()
 
     def _write_extended(self, finished_tasks, finished_attacks, utility_results, security_results):
-        output_dir = Path("results_extended") / self.args.session_id
+        output_dir = Path(getattr(self.args, "results_output", "results_extended")) / self.args.session_id
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         runs_path = output_dir / "runs.jsonl"
         records = []
@@ -135,6 +132,11 @@ class BaseEvaluationSuite:
         for task, attack, utility, security in zip(finished_tasks, finished_attacks, utility_results, security_results):
             answer = attack.answer
             run_error = task.answer.get("_error") or answer.get("_error")
+            verify_errors = {
+                **task.answer.get("_verify_errors", {}),
+                **answer.get("_verify_errors", {}),
+            }
+            defense_blocked = answer.get("_defense_blocked", False)
             ctx = answer["_run_context"]
             set_run_context(**ctx)
             redact_token = release_redactions.set(self.mas_config.get("release_values", ()))
@@ -146,7 +148,10 @@ class BaseEvaluationSuite:
                      raw_response=answer.get("response"),
                      official_extracted_answer=getattr(task, "last_extracted_answer", None))
                 try:
-                    extended = evaluate_extended(ctx, attack, answer.get("response"), utility, run_error)
+                    extended = evaluate_extended(
+                        ctx, attack, answer.get("response"), utility, run_error,
+                        defense_blocked=defense_blocked,
+                    )
                 except Exception as exc:
                     emit("ERROR", stage="extended_evaluation", error_type=type(exc).__name__, message=str(exc))
                     extended = {"run_validity": "EVALUATION_ERROR", "run_outcome": "MEASUREMENT_INVALID",
@@ -167,7 +172,19 @@ class BaseEvaluationSuite:
                     "raw_response": answer.get("response"),
                     "official_extracted_answer": getattr(task, "last_extracted_answer", None),
                     "official_task_verify": utility,
+                    "execution_error": answer.get("_execution_error"),
+                    "verification_errors": verify_errors,
+                    "defense_blocked": defense_blocked,
+                    "release_attempts": answer.get("_release_attempts", []),
+                    "task_profile": answer.get("_task_profile", "aciarena_default"),
                 }
+                if isinstance(task, QATask):
+                    strict = explicit_answer(answer.get("response") or "", task.get_query())
+                    record["qa"] = {
+                        "explicit_answer": strict,
+                        "explicit_correct": strict == task.get_gt(),
+                        "always_a_correct": task.get_gt() == "A",
+                    }
                 records.append(sanitize(record))
             finally:
                 release_redactions.reset(redact_token)
@@ -181,6 +198,7 @@ class BaseEvaluationSuite:
         attack_count = len(self.tasks) * repeats * sum(a.attack_surface != "none" for a in self.executor.get_attacks())
         summary = summarize(records, intended, attack_count)
         summary["session_id"] = self.args.session_id
+        summary["qa_shuffle_seed"] = getattr(self.args, "qa_shuffle_seed", None)
         summary_path = output_dir / "summary.json"
         fd = os.open(summary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -196,13 +214,19 @@ class BaseEvaluationSuite:
             set_execution("evaluation", answer.get("_round_count", 0))
         try:
             with bind_agent(f"official_{kind}_evaluator"):
+                code_verify = getattr(self, "code_verify", None)
+                if code_verify is not None and isinstance(item, CodeTask):
+                    return code_verify(item)
                 return item.verify()
         except Exception as exc:
             answer = item.answer
             if isinstance(answer, dict):
-                answer["_error"] = {"stage": "evaluation", "error_type": type(exc).__name__, "message": str(exc)}
+                error = {"stage": "evaluation", "error_type": type(exc).__name__, "message": str(exc)}
+                answer.setdefault("_verify_errors", {})[kind] = error
+                if not answer.get("_error"):
+                    answer["_error"] = error
                 if ctx:
-                    emit("ERROR", verifier=kind, **answer["_error"])
+                    emit("ERROR", verifier=kind, **error)
             return 0.0
         finally:
             release_redactions.reset(redact_token)
