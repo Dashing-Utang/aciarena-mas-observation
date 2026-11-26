@@ -28,6 +28,73 @@ def main(args):
     os.makedirs(save_dir, exist_ok=True)
 
     suite = build_suite(args)
+    shield_policy = getattr(args, "shield_policy", None)
+    release_config = getattr(args, "shield_release_config", None)
+    if release_config and not shield_policy:
+        raise ValueError("--shield-release-config requires a Shield policy")
+    if shield_policy:
+        from subagentshield.adapters.aciarena import ACIArenaAdapter, workflow_jobs
+
+        framework = args.mas.lower()
+        if framework not in ("camel", "metagpt"):
+            raise ValueError("ACIArena Shield binding supports CAMEL and MetaGPT")
+        if not getattr(suite.executor, "supports_mas_runtime", False):
+            raise ValueError("The selected executor does not support a MAS runtime binding")
+        policy = Path(shield_policy).read_bytes()
+        output = Path(args.shield_output) / args.session_id
+        output.mkdir(mode=0o700, parents=True, exist_ok=False)
+        scope = {"tools": [], "jobs": workflow_jobs(framework)}
+        release_values, reviewer, final = None, None, {"id": "aciarena-runtime"}
+        if release_config:
+            from subagentshield.core.jev import JevClient
+
+            path = Path(release_config)
+            release = json.loads(path.read_text())
+            release_values = release["protected_values"]
+            if not isinstance(release_values, list) or not release_values or not all(
+                isinstance(v, str) and v for v in release_values
+            ):
+                raise ValueError("expected nonempty protected values")
+            flow = json.loads((path.parent / release["flow_config"]).read_text())
+            final = flow["final"]
+            if not 0 <= final["allow_below"] < final["deny_at_or_above"] <= 1:
+                raise ValueError("invalid final thresholds")
+            cfg = flow["jev"]
+            questions = release.get(
+                "review_questions", release.get("review_question", cfg["question"])
+            )
+            reviewer = JevClient(cfg["model"], cfg["timeout_seconds"], questions)
+            scope["tools"] = ["publish_final_response"]
+            scope["arguments"] = {"publish_final_response": {"recipient": "requester"}}
+            suite.mas_config["release_values"] = tuple(release_values)
+            if release.get("public_code_dataset_sha256"):
+                from aciarena.evaluation.answer_release import load_public_code_tasks
+                suite.mas_config["public_code_tasks"] = load_public_code_tasks(
+                    PROJECT_ROOT / "aciarena/evaluation/datasets/aciarena_code.json",
+                    release["public_code_dataset_sha256"],
+                ) if args.task_domain == "code" else {}
+
+        def bind_runtime(mas, context, purpose):
+            if release_config and release.get("publication_authorization"):
+                purpose = release["publication_authorization"] + "\n\nTask:\n" + purpose
+            return ACIArenaAdapter(
+                mas,
+                run_id=context["run_id"],
+                task_id=context["task_id"],
+                purpose=purpose,
+                framework=framework,
+                policy=policy,
+                scope=scope,
+                final_policy=final,
+                reviewer=reviewer,
+                release_values=release_values,
+                source="live_mas",
+                output=output,
+                enforce=args.shield_mode == "enforce",
+            )
+
+        suite.mas_config["bind_runtime"] = bind_runtime
+        print("SubAgentShield traces:", output)
     result = suite.eval()
     print("Evaluation Results:", result)
     extended_summary = Path("results_extended") / args.session_id / "summary.json"
@@ -122,9 +189,16 @@ if __name__ == "__main__":
     parser.add_argument("--run_tag", default="")
     parser.add_argument("--model", help="Override model.yaml model_name for this run")
     parser.add_argument("--judge_model", help="Override judge.yaml model_name for this run")
+    parser.add_argument("--shield-policy", help="Opt in to Shield with a host policy bundle JSON")
+    parser.add_argument("--shield-mode", choices=("observe", "enforce"), default="observe")
+    parser.add_argument("--shield-output", default="results_shield", help="Directory for Shield run traces")
+    parser.add_argument("--shield-release-config", help="Host config for the final response gate")
+    parser.add_argument("--answer-recovery", action="store_true", help="Allow one task-only final-answer recovery")
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be >= 1")
+    if args.shield_mode == "enforce" and not args.shield_policy:
+        parser.error("--shield-mode enforce requires --shield-policy")
     if args.trace and args.suite != "benign" and len(args.malicious_agents) != 1:
         parser.error("v1 trace/evaluation requires exactly one --malicious_agents target")
     if args.run_tag and not all(char.isalnum() or char in "_.-" for char in args.run_tag):

@@ -11,9 +11,9 @@ class CodeTask(BaseTask):
         matches = pattern.findall(mas_response)
         extracted_answer = matches[0] if len(matches) >= 1 else mas_response
         if not mbpp:
-            extracted_answer = extracted_answer[
-                extracted_answer.find(":\n    ") + 2 :
-            ]  # remove signature
+            signature_end = extracted_answer.find(":\n    ")
+            if signature_end >= 0:
+                extracted_answer = extracted_answer[signature_end + 2 :]
         return extracted_answer
     
     def verify(self, timeout=60.0):

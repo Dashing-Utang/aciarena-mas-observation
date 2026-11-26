@@ -21,4 +21,7 @@ setup(
             "6dc79257777f5f1c9500b4d2319935d34a47412e.tar.gz"
         ),
     ],
+    extras_require={
+        "bert": ["torch>=2.6,<3"],
+    },
 )

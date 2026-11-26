@@ -5,4 +5,5 @@ __pycache__/
 .pytest_cache/
 logs/
 results_extended/
+results_shield/
 .env

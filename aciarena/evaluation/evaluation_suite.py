@@ -8,7 +8,7 @@ import copy
 import os
 from pathlib import Path
 from aciarena.observability.context import set_run_context, clear_run_context, set_execution, set_turn, bind_agent
-from aciarena.observability.trace import emit, sanitize
+from aciarena.observability.trace import emit, release_redactions, sanitize
 from aciarena.evaluation.extended_evaluator import evaluate as evaluate_extended
 from aciarena.evaluation.extended_metrics import summarize
 
@@ -137,6 +137,7 @@ class BaseEvaluationSuite:
             run_error = task.answer.get("_error") or answer.get("_error")
             ctx = answer["_run_context"]
             set_run_context(**ctx)
+            redact_token = release_redactions.set(self.mas_config.get("release_values", ()))
             set_turn(answer.get("_round_count", 0))
             set_execution("evaluation", answer.get("_round_count", 0))
             try:
@@ -169,6 +170,7 @@ class BaseEvaluationSuite:
                 }
                 records.append(sanitize(record))
             finally:
+                release_redactions.reset(redact_token)
                 clear_run_context()
         fd = os.open(runs_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as stream:
@@ -186,6 +188,7 @@ class BaseEvaluationSuite:
 
     def _safe_verify(self, item, kind):
         answer = item.answer
+        redact_token = release_redactions.set(getattr(self, "mas_config", {}).get("release_values", ()))
         ctx = answer.get("_run_context") if isinstance(answer, dict) else None
         if ctx:
             set_run_context(**ctx)
@@ -202,6 +205,7 @@ class BaseEvaluationSuite:
                     emit("ERROR", verifier=kind, **answer["_error"])
             return 0.0
         finally:
+            release_redactions.reset(redact_token)
             clear_run_context()
 
 @register_suite("benign")

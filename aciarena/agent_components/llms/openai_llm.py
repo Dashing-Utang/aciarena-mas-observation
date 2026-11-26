@@ -3,7 +3,7 @@ from openai import OpenAI, AsyncOpenAI
 from openai import OpenAIError, RateLimitError, APIConnectionError, Timeout, BadRequestError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential, AsyncRetrying, RetryError
 from pydantic import BaseModel
-from aciarena.observability.trace import emit, record_llm_request, record_agent_output
+from aciarena.observability.trace import emit, record_llm_request, record_agent_output, response_metadata
 
 class AgentResponseSchema(BaseModel):
     response: str
@@ -43,7 +43,7 @@ class OpenAILLM(BaseLLM):
         stop=stop_after_attempt(3),
         reraise=True
     )
-    def call_llm(self, messages, temperature=None, json_output=False, option_num=None, is_multi_options=False) -> str:
+    def call_llm(self, messages, temperature=None, json_output=False, option_num=None, is_multi_options=False, *, json_schema=None) -> str:
         params = {"model": self.model_name, "messages": messages}
         if self.model_name.startswith("gpt-5"):
             params["max_completion_tokens"] = self.max_tokens
@@ -53,7 +53,9 @@ class OpenAILLM(BaseLLM):
                 temperature=self.temperature if temperature is None else temperature,
                 seed=self.seed,
             )
-        if json_output:
+        if json_schema is not None:
+            params["response_format"] = {"type": "json_schema", "json_schema": json_schema}
+        elif json_output:
             params["response_format"] = {"type": "json_object"}
         
         try:
@@ -62,13 +64,14 @@ class OpenAILLM(BaseLLM):
                 params["n"] = option_num
                 response = self.client.chat.completions.create(**params)
                 self.calculate_token_usage(response)
-                record_agent_output([choice.message.content for choice in response.choices], request_id)
+                record_agent_output([choice.message.content for choice in response.choices], request_id,
+                                    response_metadata=response_metadata(response))
                 return response
             else:    
                 response = self.client.chat.completions.create(**params)
                 self.calculate_token_usage(response)
                 output = response.choices[0].message.content if response.choices else "[Empty response]"
-                record_agent_output(output, request_id)
+                record_agent_output(output, request_id, response_metadata=response_metadata(response))
                 return output
         except BadRequestError as e:
             raise RuntimeError(f"Bad request to OpenAI API: {e}")
@@ -98,7 +101,7 @@ class OpenAILLM(BaseLLM):
                     request_id = record_llm_request(self.model_name, messages)
                     response = await self.async_client.chat.completions.create(**params)
             output = response.choices[0].message.content if response.choices else "[Empty response]"
-            record_agent_output(output, request_id)
+            record_agent_output(output, request_id, response_metadata=response_metadata(response))
             return output
         except BadRequestError as e:
             raise RuntimeError(f"Bad request to OpenAI API: {e}")
